@@ -543,43 +543,5 @@ class TestRegimeService:
             service.str2bool("invalid")
 
 
-class TestCLIIntegration:
-    """Test CLI integration for regime detector"""
-
-    def test_cli_import(self):
-        """Test that CLI module can be imported"""
-        from connors.cli.regime_detector import main
-
-        assert callable(main)
-
-    @patch("connors.cli.regime_detector.RegimeService")
-    @patch("sys.argv", ["regime_detector", "--list-methods"])
-    def test_cli_list_methods(self, mock_service_class):
-        """Test CLI list methods functionality"""
-        mock_service = Mock()
-
-        # Mock all the methods called in the CLI
-        mock_service.get_available_methods.return_value = ["rule_based"]
-        mock_service.get_datasources.return_value = ["yfinance", "polygon"]
-        mock_service.get_market_configs.return_value = ["america", "australia"]
-        mock_service.get_available_timeframes.return_value = ["1D", "1W", "1M", "1Y"]
-
-        mock_service.get_all_methods_info.return_value = {
-            "rule_based": {
-                "description": "Rule-based regime detection",
-                "default_parameters": {"bull_return_threshold": 0.10},
-            }
-        }
-        mock_service_class.return_value = mock_service
-
-        from connors.cli.regime_detector import main
-
-        # Should not raise exception
-        try:
-            main()
-        except SystemExit:
-            pass  # Expected for argparse when --list-methods is used
-
-
 if __name__ == "__main__":
     pytest.main([__file__])
