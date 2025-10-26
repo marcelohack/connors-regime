@@ -12,19 +12,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
 import connors_datafetch.datasources.finnhub  # noqa: F401
 import connors_datafetch.datasources.fmp  # noqa: F401
 import connors_datafetch.datasources.polygon  # noqa: F401
 
 # Import all datasources to ensure registration
 import connors_datafetch.datasources.yfinance  # noqa: F401
+import pandas as pd
+import plotly.graph_objects as go
 from connors_datafetch.config.manager import DataFetchConfigManager
 from connors_datafetch.core.timespan import TimespanCalculator
 from connors_datafetch.services.datafetch_service import DataFetchService
+from plotly.subplots import make_subplots
+
 from connors_regime.core.market_regime import (
     RegimeMethod,
     RegimeResult,
@@ -353,7 +353,9 @@ class RegimeService(BaseService):
             start_date = "unknown"
             end_date = "unknown"
 
-        filename = f"{request.ticker}_{request.market_config}_{start_date}_{end_date}.json"
+        filename = (
+            f"{request.ticker}_{request.market_config}_{start_date}_{end_date}.json"
+        )
         results_path = method_dir / filename
 
         # Prepare results data
@@ -411,7 +413,9 @@ class RegimeService(BaseService):
             start_date = "unknown"
             end_date = "unknown"
 
-        filename = f"{request.ticker}_{request.market_config}_{start_date}_{end_date}.html"
+        filename = (
+            f"{request.ticker}_{request.market_config}_{start_date}_{end_date}.html"
+        )
         plot_path = plots_dir / filename
 
         # Create subplot with multiple panels
@@ -705,7 +709,9 @@ class RegimeService(BaseService):
             raise FileNotFoundError(f"External method file not found: {file_path}")
 
         if not path.suffix == ".py":
-            raise ValueError(f"External method file must be a Python file (.py): {file_path}")
+            raise ValueError(
+                f"External method file must be a Python file (.py): {file_path}"
+            )
 
         # Generate a unique module name
         module_name = f"external_regime_method_{path.stem}_{hash(str(path.absolute()))}"
@@ -744,9 +750,9 @@ class RegimeService(BaseService):
                 class_name, class_obj = method_classes[0]
                 # Use the class name as the method name
                 method_name = class_name.lower()
-                if method_name.endswith('detector'):
+                if method_name.endswith("detector"):
                     method_name = method_name[:-8]  # Remove 'detector' suffix
-                if method_name.endswith('regime'):
+                if method_name.endswith("regime"):
                     method_name = method_name[:-6]  # Remove 'regime' suffix
 
                 self.registry._regime_methods[method_name] = class_obj
