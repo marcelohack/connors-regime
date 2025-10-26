@@ -343,7 +343,7 @@ class TestRegimeService:
         all_info = service.get_all_methods_info()
         assert "rule_based" in all_info
 
-    @patch("connors.services.regime_service.RegimeService._download_data")
+    @patch("connors_regime.services.regime_service.RegimeService._download_data")
     def test_detect_regime_success(self, mock_download, service, sample_request):
         """Test successful regime detection"""
         # Mock the download data method
@@ -368,7 +368,7 @@ class TestRegimeService:
         assert result.method == RegimeMethod.RULE_BASED
         assert result.results is not None
 
-    @patch("connors.services.regime_service.RegimeService._download_data")
+    @patch("connors_regime.services.regime_service.RegimeService._download_data")
     def test_detect_regime_with_save(self, mock_download, service, tmp_path):
         """Test regime detection with result saving"""
         # Setup temp directory

@@ -257,17 +257,17 @@ class RegimeService(BaseService):
                 if not isinstance(data.index, pd.DatetimeIndex):
                     if "date" in data.columns:
                         data.set_index("date", inplace=True)
-                        data.index = pd.to_datetime(data.index)
+                        data.index = pd.to_datetime(data.index, format="ISO8601")
                     elif data.index.name in ["date", "Date", "datetime"]:
-                        data.index = pd.to_datetime(data.index)
+                        data.index = pd.to_datetime(data.index, format="ISO8601")
                     else:
-                        data.index = pd.to_datetime(data.index)
+                        data.index = pd.to_datetime(data.index, format="ISO8601")
 
             except Exception as e:
                 # Fallback: try orient='index' approach
                 try:
                     data = pd.read_json(file_path, orient="index")
-                    data.index = pd.to_datetime(data.index)
+                    data.index = pd.to_datetime(data.index, format="ISO8601")
                 except Exception as e2:
                     raise ValueError(
                         f"Could not load JSON file: {e}. Fallback attempt also failed: {e2}"
