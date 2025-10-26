@@ -731,10 +731,12 @@ class RegimeService(BaseService):
             method_classes = []
             for attr_name in dir(module):
                 attr = getattr(module, attr_name)
-                if (inspect.isclass(attr) and
-                    hasattr(attr, 'detect') and
-                    hasattr(attr, 'get_default_parameters') and
-                    hasattr(attr, 'get_parameter_info')):
+                if (
+                    inspect.isclass(attr)
+                    and hasattr(attr, "detect")
+                    and hasattr(attr, "get_default_parameters")
+                    and hasattr(attr, "get_parameter_info")
+                ):
                     method_classes.append((attr_name, attr))
 
             if len(method_classes) == 1:
