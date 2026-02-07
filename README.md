@@ -1,38 +1,27 @@
-# Connors Regime - Market Regime Detection
+# connors-regime
 
-A Python library for detecting market regimes using various algorithmic methods. Part of the Connors Trading framework.
+> Part of the [Connors Trading System](https://github.com/marcelohack/connors-playground)
+
+## Overview
+
+Market regime detection library using algorithmic methods to classify market conditions. Identifies bull, bear, sideways, high/low volatility, crisis, and recovery regimes with confidence scores and transition tracking.
 
 ## Features
 
-- **Multiple Detection Methods:**
-  - Rule-Based Regime Detection (threshold-based)
-  - Future: Clustering, HMM, Regime-Switching models
-
-- **Market Regime Types:**
-  - Bull / Bear markets
-  - Sideways / Ranging markets
-  - High / Low volatility regimes
-  - Crisis and Recovery periods
-
-- **Flexible Integration:**
-  - Programmatic API for Python applications
-  - Support for external custom detection methods
-  - Integration with connors-datafetch for data sourcing
-
-- **Rich Output:**
-  - Regime classifications with confidence scores
-  - Transition detection and tracking
-  - Interactive visualizations (Plotly)
-  - JSON export for results
+- **Rule-Based Detection**: Threshold-based regime classification using rolling returns and volatility
+- **7 Regime Types**: Bull, Bear, Sideways, High/Low Volatility, Crisis, Recovery
+- **External Methods**: Load custom detection algorithms from external Python files
+- **Rich Output**: Confidence scores, transition detection, interactive Plotly visualizations
+- **Data Integration**: Works with connors-datafetch or custom DataFrames
 
 ## Installation
 
-### From GitHub (Development)
 ```bash
 pip install git+https://github.com/marcelohack/connors-regime.git@main
 ```
 
-### Local Development
+For development:
+
 ```bash
 git clone https://github.com/marcelohack/connors-regime.git
 cd connors-regime
@@ -40,8 +29,6 @@ pip install -e .
 ```
 
 ## Quick Start
-
-### Programmatic Usage
 
 ```python
 from connors_regime import RegimeService, RegimeDetectionRequest
@@ -71,49 +58,61 @@ print(f"Transitions: {len(result.results.regime_transitions)}")
 print(f"Confidence: {result.results.detections[-1].confidence:.1%}")
 ```
 
-### Available Methods
+## CLI Usage
 
-```python
-from connors_regime import RegimeService
+The regime detection CLI is part of [connors-playground](https://github.com/marcelohack/connors-playground):
 
-service = RegimeService()
+```bash
+# Basic regime detection
+python -m connors.cli.regime_detector --ticker AAPL --method rule_based --timespan 2Y
 
-# List available detection methods
-methods = service.get_available_methods()
-print(methods)  # ['rule_based']
+# With custom thresholds
+python -m connors.cli.regime_detector --ticker MSFT --method rule_based \
+  --method-params "bull_return_threshold:0.15;volatility_window:30"
 
-# Get method details
-method_info = service.get_method_info("rule_based")
-print(method_info["description"])
-print(method_info["default_parameters"])
+# With plotting and saving
+python -m connors.cli.regime_detector --ticker NVDA --method rule_based \
+  --timespan 1Y --plot --save-results --save-plot
+
+# External detection method
+python -m connors.cli.regime_detector --ticker TSLA \
+  --external-method ~/.connors/regime_methods/test_regime_method.py \
+  --method-params "detection_method:momentum;lookback_period:30" --timespan 6M
+
+# Different markets and data sources
+python -m connors.cli.regime_detector --ticker BHP --method rule_based \
+  --market australia --datasource yfinance --timespan 1Y
+
+# Using dataset file
+python -m connors.cli.regime_detector --ticker CUSTOM --method rule_based \
+  --dataset-file my_data.csv --plot
+
+# Show method parameters
+python -m connors.cli.regime_detector --method rule_based --show-method-params
+
+# List methods and saved results
+python -m connors.cli.regime_detector --list-methods
+python -m connors.cli.regime_detector --list-saved
 ```
 
-### Custom Parameters
+## Rule-Based Detection
+
+Classifies regimes based on configurable thresholds:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `return_window` | 60 days | Rolling window for return calculations |
+| `volatility_window` | 20 days | Rolling window for volatility |
+| `bull_return_threshold` | 0.10 (10%) | Minimum return for bull classification |
+| `bear_return_threshold` | -0.10 (-10%) | Maximum return for bear classification |
+| `high_volatility_threshold` | 0.25 (25%) | Above this = high volatility regime |
+| `low_volatility_threshold` | 0.10 (10%) | Below this = low volatility regime |
+| `crisis_return_threshold` | -0.20 | Extreme negative return threshold |
+| `crisis_volatility_threshold` | 0.35 | Extreme volatility threshold |
+
+## Custom Detection Methods
 
 ```python
-# Override default parameters
-request = RegimeDetectionRequest(
-    ticker="MSFT",
-    method="rule_based",
-    parameters={
-        "bull_return_threshold": 0.15,  # 15% threshold for bull market
-        "volatility_window": 30,        # 30-day volatility window
-        "high_volatility_threshold": 0.30,
-    },
-    timeframe="2Y",  # Last 2 years
-)
-
-result = service.detect_regime(request)
-```
-
-## External Method Registration
-
-You can create and register custom regime detection methods:
-
-### Create Custom Detector
-
-```python
-# my_custom_detector.py
 from connors_regime.core.registry import registry
 from connors_regime.core.market_regime import BaseRegimeDetector, RegimeResult
 
@@ -123,119 +122,57 @@ class MyCustomDetector(BaseRegimeDetector):
         super().__init__(method="my_custom")
 
     def detect(self, data, **params):
-        # Your custom detection logic here
-        # Must return RegimeResult object
-        pass
+        # Your custom detection logic
+        return RegimeResult(...)
 
     def get_default_parameters(self):
         return {"param1": 10, "param2": 0.5}
 
     def get_parameter_info(self):
         return {
-            "param1": {
-                "type": "int",
-                "default": 10,
-                "description": "My parameter description"
-            }
+            "param1": {"type": "int", "default": 10, "description": "..."}
         }
 ```
 
-### Load and Use Custom Detector
-
-```python
-from connors_regime import RegimeService
-
-service = RegimeService()
-
-# Load external method
-method_name = service.load_external_method("my_custom_detector.py")
-
-# Use it
-request = RegimeDetectionRequest(
-    ticker="TSLA",
-    method=method_name,  # "my_custom"
-    save_results=True,
-)
-
-result = service.detect_regime(request)
-```
-
-## Regime Detection Methods
-
-### Rule-Based Detection
-
-Classifies regimes based on configurable thresholds:
-- **Rolling Returns** - Trend detection (bull/bear/sideways)
-- **Rolling Volatility** - Volatility regime (high/low)
-- **Price vs MA** - Trend strength
-- **Volume Patterns** - Market participation
-
-**Default Parameters:**
-- `return_window`: 60 days
-- `volatility_window`: 20 days
-- `bull_return_threshold`: 0.10 (10%)
-- `bear_return_threshold`: -0.10 (-10%)
-- `high_volatility_threshold`: 0.25 (25%)
-- `low_volatility_threshold`: 0.10 (10%)
-
-## Data Requirements
-
-Input data must be OHLCV format with columns:
-- `Open`, `High`, `Low`, `Close`, `Volume`
-- DateTime index
-
-Data can be sourced from:
-- connors-datafetch integration (yfinance, polygon, finnhub, etc.)
-- Local CSV files
-- Custom pandas DataFrames
-
 ## Output Format
-
-### RegimeResult Object
-
-```python
-result.results.ticker              # Ticker symbol
-result.results.current_regime      # Current regime (RegimeType enum)
-result.results.detections          # List of RegimeDetection objects
-result.results.regime_transitions  # List of transition events
-result.results.calculation_time    # Processing time
-result.results.data                # DataFrame with regime columns added
-```
-
-### Saved Results
 
 Results are saved to `~/.connors/regime_detections/{method}/{ticker}_{market}_{start}_{end}.json`
 
-Structure:
 ```json
 {
   "ticker": "AAPL",
   "method": "rule_based",
   "current_regime": "bull",
   "calculation_time": 0.15,
-  "parameters": {...},
-  "detections": [...],
-  "regime_transitions": [...]
+  "parameters": {},
+  "detections": [],
+  "regime_transitions": []
 }
 ```
 
-## Requirements
+## Development
 
-- Python >=3.13
-- pandas >=2.0.0
-- numpy >=1.24.0
-- plotly >=5.17.0
-- connors-datafetch >=0.1.0
+```bash
+# Run tests
+pytest
+
+# Run with coverage
+pytest --cov=connors_regime
+```
+
+## Related Packages
+
+| Package | Description | Links |
+|---------|-------------|-------|
+| [connors-playground](https://github.com/marcelohack/connors-playground) | CLI + Streamlit UI (integration hub) | [README](https://github.com/marcelohack/connors-playground#readme) |
+| [connors-core](https://github.com/marcelohack/connors-core) | Registry, config, indicators, metrics | [README](https://github.com/marcelohack/connors-core#readme) |
+| [connors-backtest](https://github.com/marcelohack/connors-backtest) | Backtesting service + built-in strategies | [README](https://github.com/marcelohack/connors-backtest#readme) |
+| [connors-strategies](https://github.com/marcelohack/connors-strategies) | Trading strategy collection (private) | — |
+| [connors-screener](https://github.com/marcelohack/connors-screener) | Stock screening system | [README](https://github.com/marcelohack/connors-screener#readme) |
+| [connors-datafetch](https://github.com/marcelohack/connors-datafetch) | Multi-source data downloader | [README](https://github.com/marcelohack/connors-datafetch#readme) |
+| [connors-sr](https://github.com/marcelohack/connors-sr) | Support & Resistance calculator | [README](https://github.com/marcelohack/connors-sr#readme) |
+| [connors-bots](https://github.com/marcelohack/connors-bots) | Automated trading bots | [README](https://github.com/marcelohack/connors-bots#readme) |
 
 ## License
 
-MIT License - see LICENSE file for details
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Related Projects
-
-- [connors-datafetch](https://github.com/marcelohack/connors-datafetch) - Multi-source financial data downloader
-- [connors-trading](https://github.com/marcelohack/connors) - Main trading framework and playground
+MIT
