@@ -1,0 +1,107 @@
+name: Build Environment (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: 'Python version to install'
+        required: false
+        type: string
+        default: "3.13"
+    outputs:
+      environment-ready:
+        description: "Whether the environment was successfully built"
+        value: ${{ jobs.build-environment.outputs.environment-ready }}
+      cache-key:
+        description: "Cache key for the built environment"
+        value: ${{ jobs.build-environment.outputs.cache-key }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-environment:
+    name: Build Environment
+    runs-on: ubuntu-24.04
+
+    outputs:
+      environment-ready: ${{ steps.env-status.outputs.ready }}
+      cache-key: ${{ steps.cache-keys.outputs.env-key }}
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Generate Cache Keys
+      id: cache-keys
+      run: |
+        # Create a composite cache key for the entire environment
+        ENV_KEY="${{ runner.os }}-env-py${{ inputs.python-version }}-$(date +%Y%m%d)"
+        echo "env-key=$ENV_KEY" >> $GITHUB_OUTPUT
+        echo "Environment cache key: $ENV_KEY"
+
+    # === Python Setup ===
+    - name: Set Up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        cache: 'pip'
+        cache-dependency-path: pyproject.toml
+
+    - name: Upgrade pip
+      run: |
+        python -m pip install --upgrade pip
+
+    - name: Cache Python Dependencies
+      id: cache-python-deps
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/pip
+          ${{ env.pythonLocation }}
+        key: ${{ runner.os }}-python-${{ inputs.python-version }}-${{ hashFiles('pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-python-${{ inputs.python-version }}-
+
+    - name: Install Python Dependencies
+      run: |
+        pip install "connors-datafetch @ git+https://github.com/marcelohack/connors-datafetch.git@main"
+        pip install -e ".[dev]"
+
+    # === Environment Validation ===
+    - name: Test Environment
+      run: |
+        echo "Testing Python environment..."
+        python --version
+        python -c "import pandas; print(f'Pandas version: {pandas.__version__}')"
+        python -c "import numpy; print(f'NumPy version: {numpy.__version__}')"
+        echo "Environment test completed successfully"
+
+    - name: Create Environment Artifact
+      run: |
+        # Create a summary of the built environment
+        mkdir -p environment-info
+        cat > environment-info/environment.json << EOF
+        {
+          "python_version": "${{ inputs.python-version }}",
+          "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "runner_os": "${{ runner.os }}",
+          "cache_key": "${{ steps.cache-keys.outputs.env-key }}"
+        }
+        EOF
+
+        # Save environment variables for the CI workflow
+        touch environment-info/environment.env
+
+    - name: Upload Environment Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-environment-${{ steps.cache-keys.outputs.env-key }}
+        path: environment-info/
+        retention-days: 1
+
+    - name: Set Environment Status
+      id: env-status
+      run: |
+        echo "ready=true" >> $GITHUB_OUTPUT
+        echo "Environment successfully built and ready for CI workflows"
