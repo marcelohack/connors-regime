@@ -20,13 +20,23 @@ Market regime detection library using algorithmic methods to classify market con
 pip install git+https://github.com/marcelohack/connors-regime.git@main
 ```
 
-For development:
+### Local Development
+
+**Prerequisites**: Python 3.13, [pyenv](https://github.com/pyenv/pyenv) + [pyenv-virtualenv](https://github.com/pyenv/pyenv-virtualenv)
 
 ```bash
-git clone https://github.com/marcelohack/connors-regime.git
-cd connors-regime
-pip install -e .
+# 1. Create and activate a virtual environment
+pyenv virtualenv 3.13 connors-regime
+pyenv activate connors-regime
+
+# 2. Install connors packages from local checkouts (not on PyPI)
+pip install -e ../datafetch
+
+# 3. Install with dev dependencies
+pip install -e ".[dev]"
 ```
+
+A `.python-version` file is included so pyenv auto-activates when you `cd` into this directory.
 
 ## Quick Start
 
