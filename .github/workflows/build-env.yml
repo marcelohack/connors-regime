@@ -65,6 +65,7 @@ jobs:
 
     - name: Install Python Dependencies
       run: |
+        pip install "connors-core @ git+https://github.com/marcelohack/connors-core.git@main"
         pip install "connors-datafetch @ git+https://github.com/marcelohack/connors-datafetch.git@main"
         pip install -e ".[dev]"
 
