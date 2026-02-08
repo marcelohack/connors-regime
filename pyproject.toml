@@ -35,6 +35,8 @@ dependencies = [
     "numpy>=1.24.0",
     # Data visualization
     "plotly>=5.17.0",
+    # Core registry
+    "connors-core>=0.1.0",
     # Data fetcher
     "connors-datafetch>=0.1.0",
 ]
