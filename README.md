@@ -22,22 +22,14 @@ pip install git+https://github.com/marcelohack/connors-regime.git@main
 
 ### Local Development
 
-**Prerequisites**: Python 3.13, [pyenv](https://github.com/pyenv/pyenv) + [pyenv-virtualenv](https://github.com/pyenv/pyenv-virtualenv)
+**Prerequisites**: [uv](https://github.com/astral-sh/uv) (will install Python 3.13 if needed).
+Sibling repos must be cloned alongside this one: `../core`, `../datafetch` (wired as editable path sources via `[tool.uv.sources]`).
 
 ```bash
-# 1. Create and activate a virtual environment
-pyenv virtualenv 3.13 connors-regime
-pyenv activate connors-regime
-
-# 2. Install connors packages from local checkouts (not on PyPI)
-pip install -e ../core
-pip install -e ../datafetch
-
-# 3. Install with dev dependencies
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
-A `.python-version` file is included so pyenv auto-activates when you `cd` into this directory.
+uv reads `.python-version` to pick the interpreter and creates `.venv/` automatically. Run commands with `uv run <cmd>` (no activation needed), or `source .venv/bin/activate`.
 
 ## Quick Start
 

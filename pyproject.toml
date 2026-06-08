@@ -70,3 +70,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+[tool.uv.sources]
+connors-core = { path = "../core", editable = true }
+connors-datafetch = { path = "../datafetch", editable = true }
