@@ -26,10 +26,10 @@ from connors_datafetch.services.datafetch_service import DataFetchService
 from plotly.subplots import make_subplots
 
 from connors_regime.core.market_regime import (
+    CompositeRegimeDetector,
     RegimeMethod,
     RegimeResult,
     RegimeType,
-    RuleBasedRegimeDetector,
 )
 from connors_regime.core.registry import registry
 from connors_regime.services.base import BaseService
@@ -77,13 +77,11 @@ class RegimeService(BaseService):
         self.download_service = DataFetchService()
         self.timespan_calculator = TimespanCalculator()
 
-        # Initialize detectors
+        # Single built-in detector; additional methods should only be
+        # added for a specific, validated need (external methods can be
+        # loaded via load_external_method for experimentation)
         self.detectors = {
-            RegimeMethod.RULE_BASED: RuleBasedRegimeDetector(),
-            # Future detectors to be added:
-            # RegimeMethod.CLUSTERING: ClusteringRegimeDetector(),
-            # RegimeMethod.HMM: HMMRegimeDetector(),
-            # RegimeMethod.REGIME_SWITCHING: RegimeSwitchingDetector(),
+            RegimeMethod.COMPOSITE: CompositeRegimeDetector(),
         }
 
         # Ensure CONNORS_HOME directory structure
@@ -189,7 +187,7 @@ class RegimeService(BaseService):
             self.logger.error(f"Regime detection failed for {request.ticker}: {e}")
             return RegimeServiceResult(
                 ticker=request.ticker,
-                method=method if "method" in locals() else RegimeMethod.RULE_BASED,
+                method=method if "method" in locals() else RegimeMethod.COMPOSITE,
                 results=None,
                 success=False,
                 error=str(e),
@@ -493,52 +491,70 @@ class RegimeService(BaseService):
             RegimeType.RECOVERY: "lightgreen",
         }
 
-        # Create regime bands
-        current_regime = None
-        regime_start = None
+        # Regime timeline in the bottom panel: one colored marker trace
+        # per regime (also establishes the date axis on row 4, which the
+        # vrect bands and vline markers need to anchor to)
+        detections_by_regime: Dict[RegimeType, List[pd.Timestamp]] = {}
+        for detection in regime_result.detections:
+            detections_by_regime.setdefault(detection.regime, []).append(
+                detection.date
+            )
 
-        for i, detection in enumerate(regime_result.detections):
-            if current_regime != detection.regime:
-                # End previous regime band
-                if current_regime is not None and regime_start is not None:
-                    fig.add_vrect(
-                        x0=regime_start,
-                        x1=detection.date,
-                        fillcolor=regime_colors.get(current_regime, "gray"),
-                        opacity=0.3,
-                        layer="below",
-                        line_width=0,
-                        row=4,
-                        col=1,
-                    )
-
-                # Start new regime
-                current_regime = detection.regime
-                regime_start = detection.date
-
-        # End final regime band
-        if current_regime is not None and regime_start is not None:
-            fig.add_vrect(
-                x0=regime_start,
-                x1=regime_result.data.index[-1],
-                fillcolor=regime_colors.get(current_regime, "gray"),
-                opacity=0.3,
-                layer="below",
-                line_width=0,
+        for regime, dates in detections_by_regime.items():
+            fig.add_trace(
+                go.Scatter(
+                    x=dates,
+                    y=[regime.value] * len(dates),
+                    mode="markers",
+                    marker=dict(
+                        color=regime_colors.get(regime, "gray"), size=6, symbol="square"
+                    ),
+                    name=regime.value,
+                    showlegend=False,
+                ),
                 row=4,
                 col=1,
             )
 
-        # Add regime transition markers
+        # Shade contiguous regime spans across all panels
+        current_regime = None
+        regime_start = None
+
+        def add_regime_band(regime: RegimeType, x0: Any, x1: Any) -> None:
+            fig.add_vrect(
+                x0=x0,
+                x1=x1,
+                fillcolor=regime_colors.get(regime, "gray"),
+                opacity=0.15,
+                layer="below",
+                line_width=0,
+                row="all",
+                col=1,
+            )
+
+        for detection in regime_result.detections:
+            if current_regime != detection.regime:
+                if current_regime is not None and regime_start is not None:
+                    add_regime_band(current_regime, regime_start, detection.date)
+                current_regime = detection.regime
+                regime_start = detection.date
+
+        if current_regime is not None and regime_start is not None:
+            add_regime_band(
+                current_regime, regime_start, regime_result.data.index[-1]
+            )
+
+        # Add regime transition markers. The x position is passed as epoch
+        # milliseconds: plotly cannot compute annotation positions for
+        # pandas Timestamps (it averages the x values internally, and
+        # Timestamp + int raises on pandas >= 2)
         for transition in regime_result.regime_transitions:
             fig.add_vline(
-                x=transition["date"],
+                x=pd.Timestamp(transition["date"]).timestamp() * 1000,
                 line_dash="dash",
                 line_color="black",
                 line_width=1,
-                opacity=0.7,
-                annotation_text=f"{transition['from_regime']} → {transition['to_regime']}",
-                annotation_position="top",
+                opacity=0.5,
                 row=4,
                 col=1,
             )

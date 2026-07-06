@@ -26,7 +26,10 @@ pytest
 pytest tests/test_regime_detector.py
 
 # Run specific test class or method
-pytest tests/test_regime_detector.py::TestRuleBasedRegimeDetector::test_detector_initialization
+pytest tests/test_regime_detector.py::TestCompositeRegimeDetector::test_detector_initialization
+
+# Run golden-period validation against real SPY history (downloads data)
+RUN_INTEGRATION=1 pytest tests/test_golden_periods.py -v
 
 # Run with coverage
 pytest --cov=connors_regime --cov-report=html
@@ -61,9 +64,9 @@ mypy connors_regime
 
 **Regime Detection** (`connors_regime/core/market_regime.py`)
 - `BaseRegimeDetector`: Abstract base class for all detectors
-- `RuleBasedRegimeDetector`: Threshold-based detection using rolling returns and volatility
+- `CompositeRegimeDetector`: The single built-in method. Classifies two independent axes — trend (`TrendState`: bull/neutral/bear from price vs long SMA + rolling return sign) and volatility (`VolatilityState`: low/normal/high/extreme from the percentile rank of annualized volatility within the asset's own trailing history) — then maps the grid onto `RegimeType` labels. Hysteresis commits a regime change only after `confirm_days` consecutive bars (`crisis_confirm_days` for crisis).
 - `RegimeType` enum: bull, bear, sideways, high_volatility, low_volatility, crisis, recovery
-- `RegimeMethod` enum: rule_based (more methods planned: clustering, HMM, regime_switching)
+- `RegimeMethod` enum: composite (deliberately the only built-in — add new methods only for a specific validated need, and make them pass the golden-period suite first)
 - `RegimeResult`: Container with detections, transitions, confidence scores, and enriched DataFrame
 
 **Service Layer** (`connors_regime/services/regime_service.py`)
@@ -78,7 +81,7 @@ mypy connors_regime
 1. **Request** → `RegimeDetectionRequest` with ticker, method, datasource, date range
 2. **Data Acquisition** → Downloads via connors-datafetch OR loads from CSV/JSON file
 3. **Column Normalization** → Converts lowercase OHLCV to title case (Open, High, Low, Close, Volume)
-4. **Feature Calculation** → Adds log_returns, rolling returns/volatility, SMA, RSI, volume metrics
+4. **Feature Calculation** → Adds log_returns, rolling returns, annualized volatility + its percentile rank, trend SMA, drawdown from trailing peak
 5. **Detection** → Applies detector logic, generates `RegimeDetection` objects per date
 6. **Enrichment** → Adds regime and confidence columns to DataFrame
 7. **Results** → Returns `RegimeServiceResult` with plots, JSON results, transition events
@@ -104,7 +107,7 @@ Service auto-detects:
 
 ```
 ~/.connors/regime_detections/
-  {method}/                          # e.g., "rule_based"
+  {method}/                          # e.g., "composite"
     {ticker}_{market}_{start}_{end}.json
     plots/
       {ticker}_{market}_{start}_{end}.html
@@ -118,27 +121,26 @@ Service auto-detects:
 - Accepts both lowercase and title case on input, normalizes to title case
 
 ### Detection Parameters
-Rule-based detector default thresholds:
-- `return_window`: 60 days
-- `volatility_window`: 20 days
-- `bull_return_threshold`: 0.10 (10%)
-- `bear_return_threshold`: -0.10 (-10%)
-- `high_volatility_threshold`: 0.25 (25%)
-- `low_volatility_threshold`: 0.10 (10%)
-- `crisis_return_threshold`: -0.20 (-20%)
-- `crisis_volatility_threshold`: 0.35 (35%)
+Composite detector defaults (see `get_parameter_info()` for the full list):
+- `return_window`: 60 bars (rolling return, trend axis)
+- `volatility_window`: 20 bars (annualized with sqrt(252) — this scaling is load-bearing; a regression test guards it)
+- `vol_percentile_window`: 252 bars trailing history for the volatility percentile rank
+- `trend_window`: 200-bar SMA; `trend_threshold`: 0.02 distance to call bull/bear
+- `vol_low_pct` / `vol_high_pct` / `vol_extreme_pct`: 0.20 / 0.80 / 0.95 percentile buckets
+- `crisis_drawdown`: -0.20 from trailing 252-bar peak
+- `confirm_days`: 5 (hysteresis); `crisis_confirm_days`: 2
 
 ### Regime Classification Priority
-1. **Crisis** (highest) - Large drawdown + extreme volatility
-2. **Recovery** - Positive returns while still below SMA
-3. **High/Low Volatility** - Based on volatility thresholds
-4. **Bull/Bear/Sideways** - Based on rolling returns
+1. **Crisis** (highest) - Deep drawdown + elevated volatility, or bear trend + extreme volatility
+2. **Recovery** - Strong short-window rebound (return_window/3 bars) while still below trend SMA with remaining drawdown
+3. **Bull/Bear** - From the trend axis (volatility state preserved in detection metadata)
+4. **High/Low Volatility / Sideways** - Neutral trend labeled by its volatility state
 
 ### Confidence Calculation
-Confidence (0.1-0.95) based on distance from thresholds:
-- Strong signals (far from threshold) → higher confidence
-- Weak signals (near threshold) → moderate confidence
-- Minimum confidence: 0.1
+Confidence (0.1-0.95) is the share of recent raw (pre-hysteresis) labels that agree with the committed regime — an agreement ratio, not a distance-from-threshold heuristic.
+
+### Validation Philosophy
+`tests/test_golden_periods.py` asserts the detector reproduces historically known SPY regimes (2017 quiet bull, March 2020 crisis, 2020 recovery, 2022 bear, 2023-24 bull) plus persistence/transition-rate sanity metrics. If a detector change breaks these, fix the detector, not the test.
 
 ## Testing
 

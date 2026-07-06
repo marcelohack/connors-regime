@@ -4,13 +4,15 @@
 
 ## Overview
 
-Market regime detection library using algorithmic methods to classify market conditions. Identifies bull, bear, sideways, high/low volatility, crisis, and recovery regimes with confidence scores and transition tracking.
+Market regime detection library. A single built-in `composite` method classifies two independent axes — **trend** (price vs long moving average + rolling return) and **volatility** (percentile rank of annualized volatility within the asset's own history) — and maps their combination onto bull, bear, sideways, high/low volatility, crisis, and recovery regimes. A hysteresis filter commits a regime change only after it persists for several bars, so regimes last weeks, not days.
+
+The detector is validated against historically known regimes on real SPY data (2017 quiet bull, March 2020 crisis, 2020 recovery, 2022 bear, 2023–24 bull) — see `tests/test_golden_periods.py`.
 
 ## Features
 
-- **Rule-Based Detection**: Threshold-based regime classification using rolling returns and volatility
-- **7 Regime Types**: Bull, Bear, Sideways, High/Low Volatility, Crisis, Recovery
-- **External Methods**: Load custom detection algorithms from external Python files
+- **Composite Detection**: trend × volatility grid, self-calibrating volatility thresholds (works unchanged on SPY, TSLA, or BTC), hysteresis against regime flickering
+- **7 Regime Types**: Bull, Bear, Sideways, High/Low Volatility, Crisis, Recovery — with both raw axes preserved in detection metadata
+- **External Methods**: Load custom detection algorithms from external Python files (for experimentation; the composite method is the single supported detector)
 - **Rich Output**: Confidence scores, transition detection, interactive Plotly visualizations
 - **Data Integration**: Works with connors-datafetch or custom DataFrames
 
@@ -42,7 +44,7 @@ service = RegimeService()
 # Create detection request
 request = RegimeDetectionRequest(
     ticker="AAPL",
-    method="rule_based",
+    method="composite",
     datasource="yfinance",
     start="2023-01-01",
     end="2024-01-01",
@@ -67,51 +69,67 @@ The regime detection CLI is part of [connors-playground](https://github.com/marc
 
 ```bash
 # Basic regime detection
-python -m connors.cli.regime_detector --ticker AAPL --method rule_based --timespan 2Y
+python -m connors.cli.regime_detector --ticker AAPL --method composite --timespan 2Y
 
-# With custom thresholds
-python -m connors.cli.regime_detector --ticker MSFT --method rule_based \
-  --method-params "bull_return_threshold:0.15;volatility_window:30"
+# With custom parameters
+python -m connors.cli.regime_detector --ticker MSFT --method composite \
+  --method-params "confirm_days:10;volatility_window:30"
 
 # With plotting and saving
-python -m connors.cli.regime_detector --ticker NVDA --method rule_based \
+python -m connors.cli.regime_detector --ticker NVDA --method composite \
   --timespan 1Y --plot --save-results --save-plot
 
-# External detection method
+# External (experimental) detection method
 python -m connors.cli.regime_detector --ticker TSLA \
-  --external-method ~/.connors/regime_methods/test_regime_method.py \
-  --method-params "detection_method:momentum;lookback_period:30" --timespan 6M
+  --external-method ~/.connors/regime_methods/my_method.py --timespan 6M
 
 # Different markets and data sources
-python -m connors.cli.regime_detector --ticker BHP --method rule_based \
+python -m connors.cli.regime_detector --ticker BHP --method composite \
   --market australia --datasource yfinance --timespan 1Y
 
 # Using dataset file
-python -m connors.cli.regime_detector --ticker CUSTOM --method rule_based \
+python -m connors.cli.regime_detector --ticker CUSTOM --method composite \
   --dataset-file my_data.csv --plot
 
 # Show method parameters
-python -m connors.cli.regime_detector --method rule_based --show-method-params
+python -m connors.cli.regime_detector --method composite --show-method-params
 
 # List methods and saved results
 python -m connors.cli.regime_detector --list-methods
 python -m connors.cli.regime_detector --list-saved
 ```
 
-## Rule-Based Detection
+## Composite Detection
 
-Classifies regimes based on configurable thresholds:
+Two independent axes are classified per bar and combined:
+
+**Trend axis** — `bull` / `neutral` / `bear` from price distance to a long SMA plus the sign of the rolling return.
+
+**Volatility axis** — `low` / `normal` / `high` / `extreme` from the percentile rank of current annualized volatility within the asset's own trailing history. Because thresholds are percentiles, they self-calibrate per asset: no retuning between SPY, TSLA, and BTC.
+
+**Mapping to regimes** — bear trend + extreme vol, or a >20% drawdown with elevated vol → `crisis`; a strong short-window rebound while still below the long SMA → `recovery`; bull/bear trend → `bull`/`bear` (volatility state kept in metadata); neutral trend is labeled by its volatility state (`high_volatility` / `low_volatility` / `sideways`).
+
+**Hysteresis** — a new regime must persist `confirm_days` consecutive bars before it is committed (`crisis_confirm_days` for crisis, so stress is flagged fast). Confidence is the share of recent raw labels agreeing with the committed regime.
+
+Key parameters (see `--show-method-params` for the full list):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `return_window` | 60 days | Rolling window for return calculations |
-| `volatility_window` | 20 days | Rolling window for volatility |
-| `bull_return_threshold` | 0.10 (10%) | Minimum return for bull classification |
-| `bear_return_threshold` | -0.10 (-10%) | Maximum return for bear classification |
-| `high_volatility_threshold` | 0.25 (25%) | Above this = high volatility regime |
-| `low_volatility_threshold` | 0.10 (10%) | Below this = low volatility regime |
-| `crisis_return_threshold` | -0.20 | Extreme negative return threshold |
-| `crisis_volatility_threshold` | 0.35 | Extreme volatility threshold |
+| `return_window` | 60 bars | Rolling return window for the trend axis |
+| `volatility_window` | 20 bars | Window for annualized volatility |
+| `vol_percentile_window` | 252 bars | Trailing history for the volatility percentile rank |
+| `trend_window` | 200 bars | Long SMA for the trend axis |
+| `vol_low_pct` / `vol_high_pct` / `vol_extreme_pct` | 0.20 / 0.80 / 0.95 | Volatility percentile buckets |
+| `crisis_drawdown` | -0.20 | Drawdown from trailing peak qualifying as crisis |
+| `confirm_days` | 5 | Bars a new regime must persist before committing |
+
+## Validation
+
+Unit tests run on synthetic data with known regimes. The golden-period suite validates against real SPY history — 2017 quiet bull, March 2020 crisis, 2020 recovery, 2022 bear, 2023–24 bull — plus sanity metrics (regimes persist ≥10 bars on average, ~<12 transitions/year, bull regimes have positive mean returns):
+
+```bash
+RUN_INTEGRATION=1 uv run pytest tests/test_golden_periods.py -v
+```
 
 ## Custom Detection Methods
 
@@ -144,7 +162,7 @@ Results are saved to `~/.connors/regime_detections/{method}/{ticker}_{market}_{s
 ```json
 {
   "ticker": "AAPL",
-  "method": "rule_based",
+  "method": "composite",
   "current_regime": "bull",
   "calculation_time": 0.15,
   "parameters": {},

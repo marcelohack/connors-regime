@@ -6,12 +6,14 @@ A library for detecting market regimes using various algorithmic methods.
 
 from connors_regime.core.market_regime import (
     BaseRegimeDetector,
+    CompositeRegimeDetector,
     RegimeDetection,
     RegimeDetector,
     RegimeMethod,
     RegimeResult,
     RegimeType,
-    RuleBasedRegimeDetector,
+    TrendState,
+    VolatilityState,
 )
 from connors_regime.core.registry import registry
 from connors_regime.services.regime_service import (
@@ -24,11 +26,13 @@ from connors_regime.version import __version__
 __all__ = [
     "RegimeType",
     "RegimeMethod",
+    "TrendState",
+    "VolatilityState",
     "RegimeDetection",
     "RegimeResult",
     "RegimeDetector",
     "BaseRegimeDetector",
-    "RuleBasedRegimeDetector",
+    "CompositeRegimeDetector",
     "RegimeService",
     "RegimeDetectionRequest",
     "RegimeServiceResult",
