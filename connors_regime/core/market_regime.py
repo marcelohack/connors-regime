@@ -1,8 +1,10 @@
 """
 Core Market Regime Detection interfaces and calculation methods
 
-This module defines the core interfaces and calculation methods for
-market regime identification using various algorithmic approaches.
+This module defines the core interfaces and the built-in composite
+regime detector. The composite detector classifies two independent
+axes — trend and volatility — and maps their combination onto a
+single regime label with hysteresis to avoid regime flickering.
 """
 
 import time
@@ -13,6 +15,8 @@ from typing import Any, Dict, List, Optional, Protocol
 
 import numpy as np
 import pandas as pd
+
+TRADING_DAYS_PER_YEAR = 252
 
 
 class RegimeType(Enum):
@@ -27,14 +31,27 @@ class RegimeType(Enum):
     RECOVERY = "recovery"
 
 
-class RegimeMethod(Enum):
-    """Enumeration of available regime detection methods"""
+class TrendState(Enum):
+    """Trend axis of the composite classification"""
 
-    RULE_BASED = "rule_based"
-    # Future methods to be added:
-    # CLUSTERING = "clustering"
-    # HMM = "hmm"
-    # REGIME_SWITCHING = "regime_switching"
+    BULL = "bull"
+    NEUTRAL = "neutral"
+    BEAR = "bear"
+
+
+class VolatilityState(Enum):
+    """Volatility axis of the composite classification"""
+
+    LOW = "low"
+    NORMAL = "normal"
+    HIGH = "high"
+    EXTREME = "extreme"
+
+
+class RegimeMethod(Enum):
+    """Enumeration of built-in regime detection methods"""
+
+    COMPOSITE = "composite"
 
 
 @dataclass
@@ -114,159 +131,72 @@ class BaseRegimeDetector(ABC):
                 "Insufficient data points for regime detection (minimum: 30)"
             )
 
-    def _calculate_features(self, data: pd.DataFrame, **params: Any) -> pd.DataFrame:
-        """Calculate regime detection features from OHLCV data"""
-        df = data.copy()
 
-        # Extract parameters
-        return_window = params.get("return_window", 60)
-        volatility_window = params.get("volatility_window", 20)
-        correlation_window = params.get("correlation_window", 20)
-
-        # Calculate rolling returns
-        df["log_returns"] = np.log(df["Close"] / df["Close"].shift(1))
-        df[f"return_{return_window}d"] = df["log_returns"].rolling(return_window).sum()
-
-        # Calculate rolling volatility
-        df[f"volatility_{volatility_window}d"] = (
-            df["log_returns"].rolling(volatility_window).std()
-        )
-
-        # Calculate price relative to moving average
-        df["sma_200"] = df["Close"].rolling(200).mean()
-        df["price_vs_sma"] = (df["Close"] - df["sma_200"]) / df["sma_200"]
-
-        # Calculate volume relative to average
-        df["volume_sma"] = df["Volume"].rolling(20).mean()
-        df["volume_ratio"] = df["Volume"] / df["volume_sma"]
-
-        # Calculate RSI
-        delta = df["Close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        df["rsi"] = 100 - (100 / (1 + rs))
-
-        return df
-
-
-class RuleBasedRegimeDetector(BaseRegimeDetector):
+class CompositeRegimeDetector(BaseRegimeDetector):
     """
-    Simple Rule-Based Threshold regime detector
+    Composite trend x volatility regime detector.
 
-    Classifies market regimes based on configurable thresholds for:
-    - Rolling returns (trend detection)
-    - Rolling volatility (volatility regime)
-    - Price vs moving average (trend strength)
-    - Volume patterns
+    Classifies two independent axes per bar:
+
+    - Trend (bull / neutral / bear): price relative to a long moving
+      average combined with the sign of the rolling return.
+    - Volatility (low / normal / high / extreme): the current annualized
+      volatility's percentile rank within the asset's own trailing
+      history, so thresholds self-calibrate across assets (SPY, TSLA,
+      BTC) without per-asset tuning.
+
+    The two axes are mapped onto the RegimeType labels:
+
+    - Bear trend with extreme volatility, or a deep drawdown with
+      elevated volatility -> CRISIS
+    - Positive rolling return while still below the long moving average
+      after a drawdown -> RECOVERY
+    - Bull / bear trend -> BULL / BEAR (volatility kept in metadata)
+    - Neutral trend -> HIGH_VOLATILITY / LOW_VOLATILITY / SIDEWAYS
+      depending on the volatility state
+
+    A hysteresis filter commits a regime change only after the new raw
+    label persists for `confirm_days` consecutive bars (crisis commits
+    after `crisis_confirm_days`), which prevents day-to-day flickering.
     """
 
     def __init__(self):
-        super().__init__(RegimeMethod.RULE_BASED)
+        super().__init__(RegimeMethod.COMPOSITE)
 
     def detect(self, data: pd.DataFrame, **params: Any) -> RegimeResult:
-        """Detect market regimes using rule-based thresholds"""
+        """Detect market regimes using the composite trend/volatility rules"""
         start_time = time.time()
 
         try:
-            # Validate data
             self._validate_data(data)
 
-            # Get parameters with defaults
             parameters = self.get_default_parameters()
             parameters.update(params)
 
-            # Calculate features
             df = self._calculate_features(data, **parameters)
 
-            # Apply rule-based classification
-            regime_detections = []
-            regime_transitions = []
-            previous_regime = None
+            raw = self._classify_raw(df, parameters)
+            detections, transitions = self._apply_hysteresis(df, raw, parameters)
 
-            # Extract thresholds
-            bull_return_threshold = parameters["bull_return_threshold"]
-            bear_return_threshold = parameters["bear_return_threshold"]
-            high_vol_threshold = parameters["high_volatility_threshold"]
-            low_vol_threshold = parameters["low_volatility_threshold"]
-            crisis_return_threshold = parameters["crisis_return_threshold"]
-            crisis_vol_threshold = parameters["crisis_volatility_threshold"]
-
-            return_col = f"return_{parameters['return_window']}d"
-            vol_col = f"volatility_{parameters['volatility_window']}d"
-
-            for idx, row in df.iterrows():
-                if pd.isna(row[return_col]) or pd.isna(row[vol_col]):
-                    continue
-
-                return_val = row[return_col]
-                vol_val = row[vol_col]
-                price_vs_sma = row.get("price_vs_sma", 0)
-
-                # Rule-based classification
-                regime = self._classify_regime(
-                    return_val, vol_val, price_vs_sma, parameters
-                )
-
-                # Calculate confidence based on how far from thresholds
-                confidence = self._calculate_confidence(
-                    return_val, vol_val, regime, parameters
-                )
-
-                detection = RegimeDetection(
-                    date=idx,
-                    regime=regime,
-                    confidence=confidence,
-                    method=self.method,
-                    metadata={
-                        "return_value": return_val,
-                        "volatility_value": vol_val,
-                        "price_vs_sma": price_vs_sma,
-                    },
-                )
-
-                regime_detections.append(detection)
-
-                # Track regime transitions
-                if previous_regime is not None and previous_regime != regime:
-                    regime_transitions.append(
-                        {
-                            "date": idx,
-                            "from_regime": previous_regime.value,
-                            "to_regime": regime.value,
-                            "confidence": confidence,
-                        }
-                    )
-
-                previous_regime = regime
-
-            # Add regime columns to dataframe with proper dtypes
             df["regime"] = pd.Series(dtype="object", index=df.index)
             df["regime_confidence"] = pd.Series(dtype="float64", index=df.index)
-
-            # Fill in the regime data for rows with detections
-            for detection in regime_detections:
+            for detection in detections:
                 df.loc[detection.date, "regime"] = detection.regime.value
                 df.loc[detection.date, "regime_confidence"] = detection.confidence
 
-            # Determine current regime (last detection)
             current_regime = (
-                regime_detections[-1].regime
-                if regime_detections
-                else RegimeType.SIDEWAYS
+                detections[-1].regime if detections else RegimeType.SIDEWAYS
             )
-
-            calculation_time = time.time() - start_time
 
             return RegimeResult(
                 ticker=getattr(data, "ticker", "UNKNOWN"),
                 data=df,
-                detections=regime_detections,
+                detections=detections,
                 method=self.method,
                 parameters=parameters,
-                calculation_time=calculation_time,
+                calculation_time=time.time() - start_time,
                 current_regime=current_regime,
-                regime_transitions=regime_transitions,
+                regime_transitions=transitions,
                 success=True,
             )
 
@@ -284,87 +214,252 @@ class RuleBasedRegimeDetector(BaseRegimeDetector):
                 error=str(e),
             )
 
-    def _classify_regime(
-        self,
-        return_val: float,
-        vol_val: float,
+    def _calculate_features(self, data: pd.DataFrame, **params: Any) -> pd.DataFrame:
+        """Calculate trend, volatility, and drawdown features"""
+        df = data.copy()
+
+        return_window = params["return_window"]
+        volatility_window = params["volatility_window"]
+        vol_percentile_window = params["vol_percentile_window"]
+        trend_window = params["trend_window"]
+
+        df["log_returns"] = np.log(df["Close"] / df["Close"].shift(1))
+        df[f"return_{return_window}d"] = df["log_returns"].rolling(return_window).sum()
+
+        # Short-window return for recovery detection: rebounds off a low
+        # move faster than trends, so a long window would keep the
+        # preceding crash in view and miss the turn
+        recovery_window = max(return_window // 3, 20)
+        df["return_recovery"] = df["log_returns"].rolling(recovery_window).sum()
+
+        # Annualized volatility; percentile rank within trailing history
+        # makes the low/high buckets self-calibrating per asset
+        vol_col = f"volatility_{volatility_window}d"
+        df[vol_col] = df["log_returns"].rolling(volatility_window).std() * np.sqrt(
+            TRADING_DAYS_PER_YEAR
+        )
+        df["vol_percentile"] = (
+            df[vol_col]
+            .rolling(vol_percentile_window, min_periods=params["vol_min_history"])
+            .rank(pct=True)
+        )
+
+        # min_periods lets shorter datasets still get a trend estimate,
+        # at reduced reliability
+        df["sma_trend"] = (
+            df["Close"]
+            .rolling(trend_window, min_periods=max(trend_window // 4, 20))
+            .mean()
+        )
+        df["price_vs_sma"] = (df["Close"] - df["sma_trend"]) / df["sma_trend"]
+
+        rolling_peak = df["Close"].rolling(TRADING_DAYS_PER_YEAR, min_periods=30).max()
+        df["drawdown"] = df["Close"] / rolling_peak - 1
+
+        return df
+
+    def _classify_raw(
+        self, df: pd.DataFrame, params: Dict[str, Any]
+    ) -> "pd.Series[Any]":
+        """Classify each bar independently (before hysteresis).
+
+        Returns a Series of (RegimeType, TrendState, VolatilityState)
+        tuples, NaN where features are not yet available.
+        """
+        return_col = f"return_{params['return_window']}d"
+
+        labels = pd.Series(index=df.index, dtype="object")
+
+        for idx, row in df.iterrows():
+            if (
+                pd.isna(row[return_col])
+                or pd.isna(row["vol_percentile"])
+                or pd.isna(row["price_vs_sma"])
+            ):
+                continue
+
+            trend = self._classify_trend(
+                row["price_vs_sma"], row[return_col], params["trend_threshold"]
+            )
+            vol_state = self._classify_volatility(row["vol_percentile"], params)
+            regime = self._map_to_regime(
+                trend,
+                vol_state,
+                price_vs_sma=row["price_vs_sma"],
+                recovery_return=row["return_recovery"],
+                drawdown=row["drawdown"],
+                params=params,
+            )
+            labels.loc[idx] = (regime, trend, vol_state)
+
+        return labels
+
+    @staticmethod
+    def _classify_trend(
+        price_vs_sma: float, rolling_return: float, trend_threshold: float
+    ) -> TrendState:
+        if price_vs_sma > trend_threshold and rolling_return > 0:
+            return TrendState.BULL
+        if price_vs_sma < -trend_threshold and rolling_return < 0:
+            return TrendState.BEAR
+        return TrendState.NEUTRAL
+
+    @staticmethod
+    def _classify_volatility(
+        vol_percentile: float, params: Dict[str, Any]
+    ) -> VolatilityState:
+        if vol_percentile >= params["vol_extreme_pct"]:
+            return VolatilityState.EXTREME
+        if vol_percentile >= params["vol_high_pct"]:
+            return VolatilityState.HIGH
+        if vol_percentile <= params["vol_low_pct"]:
+            return VolatilityState.LOW
+        return VolatilityState.NORMAL
+
+    @staticmethod
+    def _map_to_regime(
+        trend: TrendState,
+        vol_state: VolatilityState,
         price_vs_sma: float,
+        recovery_return: float,
+        drawdown: float,
         params: Dict[str, Any],
     ) -> RegimeType:
-        """Classify regime based on feature values and thresholds"""
+        elevated_vol = vol_state in (VolatilityState.HIGH, VolatilityState.EXTREME)
 
-        # Crisis detection (highest priority)
-        if (
-            return_val < params["crisis_return_threshold"]
-            and vol_val > params["crisis_volatility_threshold"]
+        if (drawdown <= params["crisis_drawdown"] and elevated_vol) or (
+            trend == TrendState.BEAR and vol_state == VolatilityState.EXTREME
         ):
             return RegimeType.CRISIS
 
-        # Recovery detection
         if (
-            return_val > params["recovery_return_threshold"] and price_vs_sma < -0.1
-        ):  # Still below SMA but recovering
+            price_vs_sma < 0
+            and drawdown <= params["recovery_drawdown"]
+            and recovery_return >= params["recovery_return_threshold"]
+        ):
             return RegimeType.RECOVERY
 
-        # High/Low volatility detection
-        if vol_val > params["high_volatility_threshold"]:
-            return RegimeType.HIGH_VOLATILITY
-        elif vol_val < params["low_volatility_threshold"]:
-            return RegimeType.LOW_VOLATILITY
-
-        # Trend-based detection
-        if return_val > params["bull_return_threshold"]:
+        if trend == TrendState.BULL:
             return RegimeType.BULL
-        elif return_val < params["bear_return_threshold"]:
+        if trend == TrendState.BEAR:
             return RegimeType.BEAR
-        else:
-            return RegimeType.SIDEWAYS
 
-    def _calculate_confidence(
+        # Neutral trend: label by volatility state
+        if elevated_vol:
+            return RegimeType.HIGH_VOLATILITY
+        if vol_state == VolatilityState.LOW:
+            return RegimeType.LOW_VOLATILITY
+        return RegimeType.SIDEWAYS
+
+    def _apply_hysteresis(
         self,
-        return_val: float,
-        vol_val: float,
-        regime: RegimeType,
+        df: pd.DataFrame,
+        raw_labels: "pd.Series[Any]",
         params: Dict[str, Any],
-    ) -> float:
-        """Calculate confidence level for regime classification"""
+    ) -> "tuple[List[RegimeDetection], List[Dict[str, Any]]]":
+        """Commit regime changes only after they persist.
 
-        # Base confidence
-        confidence = 0.5
+        A new raw label must repeat for `confirm_days` consecutive bars
+        before it replaces the committed regime (`crisis_confirm_days`
+        for crisis, so genuine market stress is flagged quickly).
+        Confidence is the share of recent raw labels that agree with the
+        committed regime.
+        """
+        confirm_days = params["confirm_days"]
+        crisis_confirm_days = params["crisis_confirm_days"]
+        return_col = f"return_{params['return_window']}d"
+        vol_col = f"volatility_{params['volatility_window']}d"
 
-        # Adjust based on how extreme the values are relative to thresholds
-        if regime == RegimeType.BULL:
-            excess = return_val - params["bull_return_threshold"]
-            confidence = min(0.95, 0.6 + excess * 2)
-        elif regime == RegimeType.BEAR:
-            excess = abs(return_val - params["bear_return_threshold"])
-            confidence = min(0.95, 0.6 + excess * 2)
-        elif regime == RegimeType.CRISIS:
-            vol_excess = vol_val - params["crisis_volatility_threshold"]
-            ret_excess = abs(return_val - params["crisis_return_threshold"])
-            confidence = min(0.95, 0.7 + (vol_excess + ret_excess))
-        elif regime == RegimeType.HIGH_VOLATILITY:
-            excess = vol_val - params["high_volatility_threshold"]
-            confidence = min(0.90, 0.6 + excess * 5)
-        elif regime == RegimeType.LOW_VOLATILITY:
-            excess = params["low_volatility_threshold"] - vol_val
-            confidence = min(0.90, 0.6 + excess * 10)
+        detections: List[RegimeDetection] = []
+        transitions: List[Dict[str, Any]] = []
 
-        return max(0.1, confidence)  # Minimum confidence
+        committed: Optional[RegimeType] = None
+        pending: Optional[RegimeType] = None
+        pending_count = 0
+        recent_raw: List[RegimeType] = []
+
+        for idx, label in raw_labels.items():
+            if not isinstance(label, tuple):
+                continue
+
+            raw_regime, trend, vol_state = label
+
+            recent_raw.append(raw_regime)
+            if len(recent_raw) > max(confirm_days * 2, 10):
+                recent_raw.pop(0)
+
+            if committed is None:
+                committed = raw_regime
+            elif raw_regime == committed:
+                pending = None
+                pending_count = 0
+            else:
+                if pending is not None and raw_regime == pending:
+                    pending_count += 1
+                else:
+                    pending = raw_regime
+                    pending_count = 1
+
+                required = (
+                    crisis_confirm_days
+                    if pending == RegimeType.CRISIS
+                    else confirm_days
+                )
+                if pending_count >= required:
+                    transitions.append(
+                        {
+                            "date": idx,
+                            "from_regime": committed.value,
+                            "to_regime": pending.value,
+                            "confidence": pending_count / max(len(recent_raw), 1),
+                        }
+                    )
+                    committed = pending
+                    pending = None
+                    pending_count = 0
+
+            agreement = sum(1 for r in recent_raw if r == committed) / len(recent_raw)
+            confidence = float(np.clip(agreement, 0.1, 0.95))
+
+            row = df.loc[idx]
+            detections.append(
+                RegimeDetection(
+                    date=idx,
+                    regime=committed,
+                    confidence=confidence,
+                    method=self.method,
+                    metadata={
+                        "raw_regime": raw_regime.value,
+                        "trend": trend.value,
+                        "volatility_state": vol_state.value,
+                        "return_value": row[return_col],
+                        "volatility_value": row[vol_col],
+                        "vol_percentile": row["vol_percentile"],
+                        "price_vs_sma": row["price_vs_sma"],
+                        "drawdown": row["drawdown"],
+                    },
+                )
+            )
+
+        return detections, transitions
 
     def get_default_parameters(self) -> Dict[str, Any]:
-        """Get default parameters for rule-based regime detection"""
+        """Get default parameters for composite regime detection"""
         return {
-            "return_window": 60,  # Days for rolling return calculation
-            "volatility_window": 20,  # Days for rolling volatility
-            "correlation_window": 20,  # Days for correlation calculation
-            "bull_return_threshold": 0.10,  # 10% positive return over window
-            "bear_return_threshold": -0.10,  # 10% negative return over window
-            "high_volatility_threshold": 0.25,  # 25% annualized volatility
-            "low_volatility_threshold": 0.10,  # 10% annualized volatility
-            "crisis_return_threshold": -0.20,  # 20% drawdown
-            "crisis_volatility_threshold": 0.35,  # 35% volatility
-            "recovery_return_threshold": 0.05,  # 5% recovery return
+            "return_window": 60,  # Bars for rolling return (trend strength)
+            "volatility_window": 20,  # Bars for annualized volatility
+            "vol_percentile_window": 252,  # Trailing history for vol percentile
+            "vol_min_history": 60,  # Min bars before vol percentile is valid
+            "trend_window": 200,  # Long moving average for trend axis
+            "trend_threshold": 0.02,  # Min |price vs SMA| to call a trend
+            "vol_low_pct": 0.20,  # Vol percentile <= this -> low vol
+            "vol_high_pct": 0.80,  # Vol percentile >= this -> high vol
+            "vol_extreme_pct": 0.95,  # Vol percentile >= this -> extreme vol
+            "crisis_drawdown": -0.20,  # Drawdown for crisis classification
+            "recovery_drawdown": -0.10,  # Min drawdown for recovery context
+            "recovery_return_threshold": 0.05,  # Rolling return for recovery
+            "confirm_days": 5,  # Bars a new regime must persist
+            "crisis_confirm_days": 2,  # Faster confirmation for crisis
         }
 
     def get_parameter_info(self) -> Dict[str, Dict[str, Any]]:
@@ -375,62 +470,97 @@ class RuleBasedRegimeDetector(BaseRegimeDetector):
                 "default": 60,
                 "min": 20,
                 "max": 252,
-                "description": "Number of days for rolling return calculation",
+                "description": "Number of bars for rolling return calculation",
             },
             "volatility_window": {
                 "type": "int",
                 "default": 20,
                 "min": 5,
                 "max": 100,
-                "description": "Number of days for rolling volatility calculation",
+                "description": "Number of bars for annualized volatility calculation",
             },
-            "bull_return_threshold": {
-                "type": "float",
-                "default": 0.10,
-                "min": 0.01,
-                "max": 0.50,
-                "description": "Minimum return threshold for bull market classification",
+            "vol_percentile_window": {
+                "type": "int",
+                "default": 252,
+                "min": 60,
+                "max": 756,
+                "description": "Trailing bars used to rank current volatility",
             },
-            "bear_return_threshold": {
-                "type": "float",
-                "default": -0.10,
-                "min": -0.50,
-                "max": -0.01,
-                "description": "Maximum return threshold for bear market classification",
+            "vol_min_history": {
+                "type": "int",
+                "default": 60,
+                "min": 30,
+                "max": 252,
+                "description": "Minimum bars of history before volatility percentile is valid",
             },
-            "high_volatility_threshold": {
-                "type": "float",
-                "default": 0.25,
-                "min": 0.15,
-                "max": 0.60,
-                "description": "Minimum volatility threshold for high volatility regime",
+            "trend_window": {
+                "type": "int",
+                "default": 200,
+                "min": 50,
+                "max": 300,
+                "description": "Moving average window for the trend axis",
             },
-            "low_volatility_threshold": {
+            "trend_threshold": {
                 "type": "float",
-                "default": 0.10,
+                "default": 0.02,
+                "min": 0.0,
+                "max": 0.10,
+                "description": "Minimum price distance from trend SMA to classify bull/bear",
+            },
+            "vol_low_pct": {
+                "type": "float",
+                "default": 0.20,
                 "min": 0.05,
-                "max": 0.20,
-                "description": "Maximum volatility threshold for low volatility regime",
+                "max": 0.40,
+                "description": "Volatility percentile at or below which volatility is low",
             },
-            "crisis_return_threshold": {
+            "vol_high_pct": {
+                "type": "float",
+                "default": 0.80,
+                "min": 0.60,
+                "max": 0.95,
+                "description": "Volatility percentile at or above which volatility is high",
+            },
+            "vol_extreme_pct": {
+                "type": "float",
+                "default": 0.95,
+                "min": 0.85,
+                "max": 1.0,
+                "description": "Volatility percentile at or above which volatility is extreme",
+            },
+            "crisis_drawdown": {
                 "type": "float",
                 "default": -0.20,
                 "min": -0.50,
                 "max": -0.10,
-                "description": "Return threshold for crisis regime detection",
+                "description": "Drawdown from trailing peak that qualifies as crisis (with elevated volatility)",
             },
-            "crisis_volatility_threshold": {
+            "recovery_drawdown": {
                 "type": "float",
-                "default": 0.35,
-                "min": 0.25,
-                "max": 0.80,
-                "description": "Volatility threshold for crisis regime detection",
+                "default": -0.10,
+                "min": -0.40,
+                "max": -0.05,
+                "description": "Minimum remaining drawdown for recovery classification",
             },
             "recovery_return_threshold": {
                 "type": "float",
                 "default": 0.05,
                 "min": 0.01,
                 "max": 0.20,
-                "description": "Return threshold for recovery regime detection",
+                "description": "Minimum rolling return for recovery classification",
+            },
+            "confirm_days": {
+                "type": "int",
+                "default": 5,
+                "min": 1,
+                "max": 20,
+                "description": "Consecutive bars a new regime must persist before committing",
+            },
+            "crisis_confirm_days": {
+                "type": "int",
+                "default": 2,
+                "min": 1,
+                "max": 10,
+                "description": "Consecutive bars before committing a crisis regime",
             },
         }

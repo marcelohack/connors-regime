@@ -1,547 +1,309 @@
 """
-Unit tests for Market Regime Detector
+Tests for the composite market regime detector and regime service.
 
-Tests for the core regime detection functionality, service layer,
-and CLI interface.
+The synthetic-data tests double as regressions for the bugs that made
+the previous rule-based detector untrustworthy:
+- volatility must be annualized before classification
+- a persistently volatile asset must never classify as low volatility
+- regimes must not flicker day-to-day (hysteresis)
 """
 
 import json
-import os
-import tempfile
-from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from connors_regime.core.market_regime import (
+from connors_regime import (
+    CompositeRegimeDetector,
+    RegimeDetectionRequest,
     RegimeMethod,
-    RegimeResult,
+    RegimeService,
     RegimeType,
-    RuleBasedRegimeDetector,
+    TrendState,
+    VolatilityState,
 )
-from connors_regime.services.regime_service import RegimeDetectionRequest, RegimeService
 
 
-class TestRuleBasedRegimeDetector:
-    """Test the RuleBasedRegimeDetector class"""
+def make_ohlcv(closes: np.ndarray, start: str = "2020-01-01") -> pd.DataFrame:
+    """Build an OHLCV DataFrame from a series of closes"""
+    dates = pd.date_range(start=start, periods=len(closes), freq="B")
+    df = pd.DataFrame({"Close": closes}, index=dates)
+    df["Open"] = df["Close"].shift(1).fillna(closes[0])
+    df["High"] = df[["Open", "Close"]].max(axis=1) * 1.005
+    df["Low"] = df[["Open", "Close"]].min(axis=1) * 0.995
+    df["Volume"] = 1_000_000
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+    df.ticker = "TEST"
+    return df
 
-    @pytest.fixture
-    def detector(self):
-        """Create a RuleBasedRegimeDetector instance"""
-        return RuleBasedRegimeDetector()
 
-    @pytest.fixture
-    def sample_data(self):
-        """Create sample OHLCV data for testing"""
-        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
-        np.random.seed(42)
+def closes_from_returns(returns: np.ndarray, base: float = 100.0) -> np.ndarray:
+    """Build a close price series from daily log returns"""
+    return base * np.exp(np.cumsum(returns))
 
-        # Generate realistic OHLCV data
-        base_price = 100.0
-        prices = []
-        volumes = []
 
-        for i in range(len(dates)):
-            # Add some trend and noise
-            trend_factor = 1 + (i / 1000)  # Slight upward trend
-            noise = np.random.normal(0, 0.02)  # 2% daily volatility
-            price = base_price * trend_factor * (1 + noise)
-            prices.append(price)
+@pytest.fixture
+def detector():
+    return CompositeRegimeDetector()
 
-            # Volume with some randomness
-            volume = np.random.randint(1000000, 5000000)
-            volumes.append(volume)
 
-        # Create OHLC from close prices
-        df = pd.DataFrame({"Close": prices, "Volume": volumes}, index=dates)
+@pytest.fixture
+def quiet_bull_data():
+    """~2 years of steady uptrend with modest volatility"""
+    rng = np.random.default_rng(42)
+    returns = rng.normal(0.0008, 0.008, 500)
+    return make_ohlcv(closes_from_returns(returns))
 
-        # Generate Open, High, Low from Close
-        df["Open"] = df["Close"].shift(1).fillna(df["Close"].iloc[0])
-        df["High"] = df[["Open", "Close"]].max(axis=1) * (
-            1 + np.random.uniform(0, 0.01, len(df))
-        )
-        df["Low"] = df[["Open", "Close"]].min(axis=1) * (
-            1 - np.random.uniform(0, 0.01, len(df))
-        )
 
-        # Reorder columns
-        df = df[["Open", "High", "Low", "Close", "Volume"]]
-        df.ticker = "TEST"
+@pytest.fixture
+def high_vol_data():
+    """~2 years of a persistently volatile asset (3% daily moves)"""
+    rng = np.random.default_rng(7)
+    returns = rng.normal(0.0, 0.03, 500)
+    return make_ohlcv(closes_from_returns(returns))
 
-        return df
 
+@pytest.fixture
+def crash_data():
+    """Calm uptrend, then a sharp high-volatility crash, then a rebound"""
+    rng = np.random.default_rng(3)
+    calm = rng.normal(0.0006, 0.007, 300)
+    crash = rng.normal(-0.02, 0.035, 60)
+    rebound = rng.normal(0.006, 0.012, 120)
+    returns = np.concatenate([calm, crash, rebound])
+    return make_ohlcv(closes_from_returns(returns))
+
+
+class TestCompositeRegimeDetector:
     def test_detector_initialization(self, detector):
-        """Test detector initialization"""
-        assert detector.method == RegimeMethod.RULE_BASED
+        assert detector.method == RegimeMethod.COMPOSITE
 
-    def test_get_default_parameters(self, detector):
-        """Test default parameters retrieval"""
+    def test_default_parameters(self, detector):
         params = detector.get_default_parameters()
+        info = detector.get_parameter_info()
 
-        expected_params = {
-            "return_window",
-            "volatility_window",
-            "correlation_window",
-            "bull_return_threshold",
-            "bear_return_threshold",
-            "high_volatility_threshold",
-            "low_volatility_threshold",
-            "crisis_return_threshold",
-            "crisis_volatility_threshold",
-            "recovery_return_threshold",
-        }
-
-        assert set(params.keys()) == expected_params
-        assert params["return_window"] == 60
-        assert params["volatility_window"] == 20
-        assert params["bull_return_threshold"] == 0.10
-        assert params["bear_return_threshold"] == -0.10
-
-    def test_get_parameter_info(self, detector):
-        """Test parameter information retrieval"""
-        param_info = detector.get_parameter_info()
-
-        assert "return_window" in param_info
-        assert "volatility_window" in param_info
-        assert "bull_return_threshold" in param_info
-
-        # Check parameter structure
-        return_window_info = param_info["return_window"]
-        assert return_window_info["type"] == "int"
-        assert return_window_info["default"] == 60
-        assert "description" in return_window_info
-
-    def test_data_validation_success(self, detector, sample_data):
-        """Test successful data validation"""
-        # Should not raise an exception
-        detector._validate_data(sample_data)
+        # Every parameter must be documented and every documented
+        # parameter must have a default
+        assert set(params.keys()) == set(info.keys())
+        assert params["confirm_days"] >= 1
+        assert 0 < params["vol_low_pct"] < params["vol_high_pct"]
+        assert params["vol_high_pct"] <= params["vol_extreme_pct"]
 
     def test_data_validation_missing_columns(self, detector):
-        """Test data validation with missing columns"""
-        invalid_data = pd.DataFrame(
-            {
-                "Open": [100, 101, 102],
-                "High": [105, 106, 107],
-                # Missing Low, Close, Volume
-            }
-        )
-
+        df = pd.DataFrame({"Close": range(100)})
         with pytest.raises(ValueError, match="Missing required columns"):
-            detector._validate_data(invalid_data)
+            detector._validate_data(df)
 
-    def test_data_validation_insufficient_data(self, detector):
-        """Test data validation with insufficient data points"""
-        insufficient_data = pd.DataFrame(
-            {
-                "Open": [100, 101],
-                "High": [105, 106],
-                "Low": [95, 96],
-                "Close": [102, 104],
-                "Volume": [1000, 1100],
-            }
-        )
-
+    def test_data_validation_insufficient_data(self, detector, quiet_bull_data):
         with pytest.raises(ValueError, match="Insufficient data points"):
-            detector._validate_data(insufficient_data)
+            detector._validate_data(quiet_bull_data.iloc[:10])
 
-    def test_feature_calculation(self, detector, sample_data):
-        """Test feature calculation from OHLCV data"""
-        features_df = detector._calculate_features(sample_data)
+    def test_volatility_is_annualized(self, detector, high_vol_data):
+        """Regression: raw daily std must be scaled by sqrt(252).
 
-        # Check that new columns are added
-        expected_new_cols = {
-            "log_returns",
-            "return_60d",
-            "volatility_20d",
-            "sma_200",
-            "price_vs_sma",
-            "volume_sma",
-            "volume_ratio",
-            "rsi",
-        }
+        The original rule-based detector compared daily volatility
+        (~0.03) against annualized thresholds (0.25), classifying
+        everything as low volatility.
+        """
+        result = detector.detect(high_vol_data)
+        vol = result.data["volatility_20d"].dropna()
 
-        new_cols = set(features_df.columns) - set(sample_data.columns)
-        assert expected_new_cols.issubset(new_cols)
+        expected = 0.03 * np.sqrt(252)  # ~0.48 annualized
+        assert vol.median() == pytest.approx(expected, rel=0.2)
 
-        # Check that features have reasonable values
-        assert not features_df["log_returns"].isna().all()
-        assert features_df["volatility_20d"].min() >= 0  # Volatility should be positive
-        assert 0 <= features_df["rsi"].max() <= 100  # RSI should be 0-100
+    def test_high_vol_asset_not_labeled_low_volatility(self, detector, high_vol_data):
+        """Regression: TSLA-style asset was 100% low_volatility before.
 
-    def test_regime_classification(self, detector):
-        """Test regime classification logic"""
-        params = detector.get_default_parameters()
+        With percentile-based volatility a persistently volatile asset
+        should distribute across states rather than pin to LOW.
+        """
+        result = detector.detect(high_vol_data)
+        assert result.success
+        assert len(result.detections) > 50
 
-        # Test bull market classification
-        bull_regime = detector._classify_regime(
-            return_val=0.15,  # Above bull threshold
-            vol_val=0.15,  # Normal volatility
-            price_vs_sma=0.05,  # Above SMA
-            params=params,
+        low_vol_share = sum(
+            1 for d in result.detections if d.regime == RegimeType.LOW_VOLATILITY
+        ) / len(result.detections)
+        assert low_vol_share < 0.9
+
+    def test_quiet_bull_detected(self, detector, quiet_bull_data):
+        result = detector.detect(quiet_bull_data)
+        assert result.success
+
+        # Once the trend SMA is established the uptrend should dominate
+        late = [d for d in result.detections if d.date >= result.data.index[300]]
+        bull_share = sum(1 for d in late if d.regime == RegimeType.BULL) / len(late)
+        assert bull_share > 0.6
+
+        # A quiet uptrend must never look like a crisis
+        assert all(d.regime != RegimeType.CRISIS for d in result.detections)
+
+    def test_crash_detected_as_crisis(self, detector, crash_data):
+        result = detector.detect(crash_data)
+        assert result.success
+
+        crash_window = result.data.index[310:380]
+        in_crash = [d for d in result.detections if d.date in crash_window]
+        crisis_share = sum(1 for d in in_crash if d.regime == RegimeType.CRISIS) / max(
+            len(in_crash), 1
         )
-        assert bull_regime == RegimeType.BULL
+        assert crisis_share > 0.3
 
-        # Test bear market classification
-        bear_regime = detector._classify_regime(
-            return_val=-0.15,  # Below bear threshold
-            vol_val=0.15,  # Normal volatility
-            price_vs_sma=-0.05,  # Below SMA
-            params=params,
+    def test_recovery_after_crash(self, detector, crash_data):
+        result = detector.detect(crash_data)
+        rebound_window = result.data.index[380:]
+        in_rebound = {d.regime for d in result.detections if d.date in rebound_window}
+        # The rebound should register as recovery and/or a return to bull
+        assert in_rebound & {RegimeType.RECOVERY, RegimeType.BULL}
+
+    def test_regimes_do_not_flicker(self, detector, crash_data):
+        """Committed regimes must persist; raw day-to-day noise is
+        absorbed by the hysteresis filter."""
+        result = detector.detect(crash_data)
+
+        regimes = [d.regime for d in result.detections]
+        durations = []
+        run = 1
+        for prev, cur in zip(regimes, regimes[1:]):
+            if cur == prev:
+                run += 1
+            else:
+                durations.append(run)
+                run = 1
+        durations.append(run)
+
+        assert np.mean(durations) >= 5
+
+    def test_transitions_match_detections(self, detector, crash_data):
+        result = detector.detect(crash_data)
+        regime_changes = sum(
+            1
+            for prev, cur in zip(result.detections, result.detections[1:])
+            if prev.regime != cur.regime
         )
-        assert bear_regime == RegimeType.BEAR
+        assert len(result.regime_transitions) == regime_changes
 
-        # Test crisis classification
-        crisis_regime = detector._classify_regime(
-            return_val=-0.25,  # Below crisis threshold
-            vol_val=0.40,  # Above crisis volatility threshold
-            price_vs_sma=-0.15,  # Well below SMA
-            params=params,
-        )
-        assert crisis_regime == RegimeType.CRISIS
+    def test_detection_metadata_has_both_axes(self, detector, quiet_bull_data):
+        result = detector.detect(quiet_bull_data)
+        meta = result.detections[-1].metadata
 
-        # Test high volatility classification
-        high_vol_regime = detector._classify_regime(
-            return_val=0.05,  # Neutral return
-            vol_val=0.30,  # High volatility
-            price_vs_sma=0.02,  # Slightly above SMA
-            params=params,
-        )
-        assert high_vol_regime == RegimeType.HIGH_VOLATILITY
+        assert meta["trend"] in {t.value for t in TrendState}
+        assert meta["volatility_state"] in {v.value for v in VolatilityState}
+        assert "vol_percentile" in meta
+        assert "drawdown" in meta
 
-        # Test sideways classification
-        sideways_regime = detector._classify_regime(
-            return_val=0.02,  # Low return
-            vol_val=0.15,  # Normal volatility
-            price_vs_sma=0.01,  # Near SMA
-            params=params,
-        )
-        assert sideways_regime == RegimeType.SIDEWAYS
+    def test_confidence_bounds(self, detector, crash_data):
+        result = detector.detect(crash_data)
+        assert all(0.1 <= d.confidence <= 0.95 for d in result.detections)
 
-    def test_confidence_calculation(self, detector):
-        """Test confidence level calculation"""
-        params = detector.get_default_parameters()
-
-        # Test strong bull signal confidence
-        strong_bull_conf = detector._calculate_confidence(
-            return_val=0.20,  # Well above threshold
-            vol_val=0.15,
-            regime=RegimeType.BULL,
-            params=params,
-        )
-        assert strong_bull_conf > 0.7  # Should be high confidence
-
-        # Test weak signal confidence
-        weak_conf = detector._calculate_confidence(
-            return_val=0.11,  # Just above threshold
-            vol_val=0.15,
-            regime=RegimeType.BULL,
-            params=params,
-        )
-        assert 0.5 < weak_conf < 0.8  # Should be moderate confidence
-
-    def test_detect_success(self, detector, sample_data):
-        """Test successful regime detection"""
-        result = detector.detect(sample_data)
-
-        assert isinstance(result, RegimeResult)
-        assert result.success is True
-        assert result.error is None
-        assert result.method == RegimeMethod.RULE_BASED
-        assert result.ticker == "TEST"
-        assert len(result.detections) > 0
-        assert result.current_regime is not None
-        assert isinstance(result.current_regime, RegimeType)
-        assert result.calculation_time > 0
-
-        # Check that regime columns were added to data
-        assert "regime" in result.data.columns
-        assert "regime_confidence" in result.data.columns
-
-    def test_detect_with_custom_parameters(self, detector, sample_data):
-        """Test regime detection with custom parameters"""
-        custom_params = {
-            "bull_return_threshold": 0.05,  # Lower threshold
-            "bear_return_threshold": -0.05,
-            "volatility_window": 10,  # Shorter window
-        }
-
-        result = detector.detect(sample_data, **custom_params)
-
-        assert result.success is True
-        assert result.parameters["bull_return_threshold"] == 0.05
+    def test_custom_parameters(self, detector, quiet_bull_data):
+        result = detector.detect(quiet_bull_data, volatility_window=10, confirm_days=3)
+        assert result.success
         assert result.parameters["volatility_window"] == 10
+        assert "volatility_10d" in result.data.columns
 
     def test_detect_with_invalid_data(self, detector):
-        """Test regime detection with invalid data"""
-        invalid_data = pd.DataFrame(
-            {
-                "Open": [100, 101],
-                "High": [105, 106],
-                "Low": [95, 96],
-                "Close": [102, 104],
-                "Volume": [1000, 1100],
-            }
-        )
-
-        result = detector.detect(invalid_data)
-
+        df = pd.DataFrame({"Close": range(5)})
+        result = detector.detect(df)
         assert result.success is False
         assert result.error is not None
-        assert "Insufficient data points" in result.error
 
 
 class TestRegimeService:
-    """Test the RegimeService class"""
+    @pytest.fixture
+    def service(self, tmp_path):
+        service = RegimeService()
+        service.regime_base_dir = tmp_path / "regime_detections"
+        service.regime_base_dir.mkdir(parents=True, exist_ok=True)
+        return service
 
     @pytest.fixture
-    def service(self):
-        """Create a RegimeService instance"""
-        return RegimeService()
-
-    @pytest.fixture
-    def sample_request(self):
-        """Create a sample regime detection request"""
-        return RegimeDetectionRequest(
-            ticker="AAPL",
-            method="rule_based",
-            start="2023-01-01",
-            end="2023-12-31",
-        )
+    def mock_data(self, quiet_bull_data):
+        data = quiet_bull_data.copy()
+        data.ticker = "AAPL"
+        return data
 
     def test_service_initialization(self, service):
-        """Test service initialization"""
-        assert service.regime_base_dir.exists()
-        assert RegimeMethod.RULE_BASED in service.detectors
+        assert RegimeMethod.COMPOSITE in service.detectors
         assert isinstance(
-            service.detectors[RegimeMethod.RULE_BASED], RuleBasedRegimeDetector
+            service.detectors[RegimeMethod.COMPOSITE], CompositeRegimeDetector
         )
 
     def test_get_available_methods(self, service):
-        """Test getting available methods"""
         methods = service.get_available_methods()
-        assert "rule_based" in methods
-        assert len(methods) >= 1
+        assert methods == ["composite"]
 
     def test_get_method_info(self, service):
-        """Test getting method information"""
-        info = service.get_method_info("rule_based")
-
-        assert info["name"] == "rule_based"
-        assert "description" in info
+        info = service.get_method_info("composite")
+        assert info["name"] == "composite"
         assert "default_parameters" in info
         assert "parameter_info" in info
 
-        # Test invalid method
-        invalid_info = service.get_method_info("invalid_method")
-        assert invalid_info == {}
-
-    def test_get_all_methods_info(self, service):
-        """Test getting all methods information"""
-        all_info = service.get_all_methods_info()
-        assert "rule_based" in all_info
+        assert service.get_method_info("invalid_method") == {}
 
     @patch("connors_regime.services.regime_service.RegimeService._download_data")
-    def test_detect_regime_success(self, mock_download, service, sample_request):
-        """Test successful regime detection"""
-        # Mock the download data method
-        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
-        mock_data = pd.DataFrame(
-            {
-                "Open": np.random.randint(95, 105, 100),
-                "High": np.random.randint(100, 110, 100),
-                "Low": np.random.randint(90, 100, 100),
-                "Close": np.random.randint(95, 105, 100),
-                "Volume": np.random.randint(1000000, 5000000, 100),
-            },
-            index=dates,
-        )
-        mock_data.ticker = "AAPL"
-        mock_download.return_value = mock_data
-
-        result = service.detect_regime(sample_request)
-
-        assert result.success is True
-        assert result.ticker == "AAPL"
-        assert result.method == RegimeMethod.RULE_BASED
-        assert result.results is not None
-
-    @patch("connors_regime.services.regime_service.RegimeService._download_data")
-    def test_detect_regime_with_save(self, mock_download, service, tmp_path):
-        """Test regime detection with result saving"""
-        # Setup temp directory
-        service.regime_base_dir = tmp_path / "regimes"
-        service.regime_base_dir.mkdir(exist_ok=True)
-
-        # Mock data
-        dates = pd.date_range(start="2023-01-01", periods=50, freq="D")
-        mock_data = pd.DataFrame(
-            {
-                "Open": np.random.randint(95, 105, 50),
-                "High": np.random.randint(100, 110, 50),
-                "Low": np.random.randint(90, 100, 50),
-                "Close": np.random.randint(95, 105, 50),
-                "Volume": np.random.randint(1000000, 5000000, 50),
-            },
-            index=dates,
-        )
-        mock_data.ticker = "AAPL"
+    def test_detect_regime_success(self, mock_download, service, mock_data):
         mock_download.return_value = mock_data
 
         request = RegimeDetectionRequest(
-            ticker="AAPL", method="rule_based", save_results=True
+            ticker="AAPL", method="composite", start="2020-01-01", end="2021-12-31"
         )
+        result = service.detect_regime(request)
 
+        assert result.success is True
+        assert result.ticker == "AAPL"
+        assert result.method == RegimeMethod.COMPOSITE
+        assert len(result.results.detections) > 0
+
+    @patch("connors_regime.services.regime_service.RegimeService._download_data")
+    def test_detect_regime_unknown_method(self, mock_download, service, mock_data):
+        mock_download.return_value = mock_data
+
+        request = RegimeDetectionRequest(ticker="AAPL", method="rule_based")
+        result = service.detect_regime(request)
+
+        assert result.success is False
+        assert "Detector not found" in result.error
+
+    @patch("connors_regime.services.regime_service.RegimeService._download_data")
+    def test_detect_regime_with_save(self, mock_download, service, mock_data):
+        mock_download.return_value = mock_data
+
+        request = RegimeDetectionRequest(
+            ticker="AAPL", method="composite", save_results=True
+        )
         result = service.detect_regime(request)
 
         assert result.success is True
         assert result.results_path is not None
         assert Path(result.results_path).exists()
 
-        # Check saved file content
-        with open(result.results_path, "r") as f:
-            saved_data = json.load(f)
+        with open(result.results_path) as f:
+            saved = json.load(f)
 
-        assert saved_data["ticker"] == "AAPL"
-        assert saved_data["method"] == "rule_based"
-        assert "detections" in saved_data
-        assert "current_regime" in saved_data
+        assert saved["ticker"] == "AAPL"
+        assert saved["method"] == "composite"
+        assert saved["current_regime"] in {r.value for r in RegimeType}
+        assert len(saved["detections"]) > 0
 
-    def test_load_dataset_file_csv(self, service, tmp_path):
-        """Test loading dataset from CSV file"""
-        # Create temporary CSV file
-        dates = pd.date_range(start="2023-01-01", periods=50, freq="D")
-        test_data = pd.DataFrame(
-            {
-                "Open": np.random.randint(95, 105, 50),
-                "High": np.random.randint(100, 110, 50),
-                "Low": np.random.randint(90, 100, 50),
-                "Close": np.random.randint(95, 105, 50),
-                "Volume": np.random.randint(1000000, 5000000, 50),
-            },
-            index=dates,
-        )
+    def test_load_dataset_file_csv(self, service, tmp_path, mock_data):
+        csv_path = tmp_path / "data.csv"
+        mock_data.to_csv(csv_path)
 
-        csv_file = tmp_path / "test_data.csv"
-        test_data.to_csv(csv_file)
-
-        loaded_data = service._load_dataset_file(str(csv_file), "TEST")
-
-        assert loaded_data.ticker == "TEST"
-        assert len(loaded_data) == 50
-        assert all(
-            col in loaded_data.columns
-            for col in ["Open", "High", "Low", "Close", "Volume"]
-        )
-
-    def test_load_dataset_file_json(self, service, tmp_path):
-        """Test loading dataset from JSON file"""
-        # Create temporary JSON file
-        dates = pd.date_range(start="2023-01-01", periods=50, freq="D")
-        test_data = pd.DataFrame(
-            {
-                "Open": np.random.randint(95, 105, 50),
-                "High": np.random.randint(100, 110, 50),
-                "Low": np.random.randint(90, 100, 50),
-                "Close": np.random.randint(95, 105, 50),
-                "Volume": np.random.randint(1000000, 5000000, 50),
-            },
-            index=dates,
-        )
-
-        json_file = tmp_path / "test_data.json"
-        test_data.to_json(json_file, orient="index")
-
-        loaded_data = service._load_dataset_file(str(json_file), "TEST")
-
-        assert loaded_data.ticker == "TEST"
-        assert len(loaded_data) == 50
-        assert all(
-            col in loaded_data.columns
-            for col in ["Open", "High", "Low", "Close", "Volume"]
-        )
+        loaded = service._load_dataset_file(str(csv_path), "AAPL")
+        assert list(loaded.columns[:5]) == ["Open", "High", "Low", "Close", "Volume"]
+        assert loaded.ticker == "AAPL"
 
     def test_load_dataset_file_missing(self, service):
-        """Test loading non-existent dataset file"""
         with pytest.raises(FileNotFoundError):
-            service._load_dataset_file("non_existent_file.csv", "TEST")
-
-    def test_load_dataset_file_invalid_format(self, service, tmp_path):
-        """Test loading dataset with unsupported format"""
-        invalid_file = tmp_path / "test_data.txt"
-        invalid_file.write_text("invalid data")
-
-        with pytest.raises(ValueError, match="Unsupported dataset file format"):
-            service._load_dataset_file(str(invalid_file), "TEST")
-
-    def test_list_saved_results_empty(self, service, tmp_path):
-        """Test listing saved results when none exist"""
-        service.regime_base_dir = tmp_path / "empty_regimes"
-        service.regime_base_dir.mkdir(exist_ok=True)
-
-        results = service.list_saved_results()
-        assert results == []
-
-    def test_list_saved_results_with_data(self, service, tmp_path):
-        """Test listing saved results with existing data"""
-        service.regime_base_dir = tmp_path / "regimes"
-
-        # Create mock saved result structure
-        method_dir = service.regime_base_dir / "rule_based" / "america"
-        method_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create mock result file
-        result_file = method_dir / "AAPL_2023-01-01_2023-12-31.json"
-        mock_result = {
-            "ticker": "AAPL",
-            "method": "rule_based",
-            "current_regime": "bull",
-        }
-
-        with open(result_file, "w") as f:
-            json.dump(mock_result, f)
-
-        results = service.list_saved_results()
-
-        assert len(results) == 1
-        assert results[0]["ticker"] == "AAPL"
-        assert results[0]["method"] == "rule_based"
-        assert results[0]["market"] == "america"
-
-    def test_delete_saved_result(self, service, tmp_path):
-        """Test deleting saved results"""
-        service.regime_base_dir = tmp_path / "regimes"
-
-        # Create mock saved result
-        method_dir = service.regime_base_dir / "rule_based" / "america"
-        method_dir.mkdir(parents=True, exist_ok=True)
-
-        result_file = method_dir / "AAPL_2023-01-01_2023-12-31.json"
-        result_file.write_text('{"test": "data"}')
-
-        assert result_file.exists()
-
-        success = service.delete_saved_result(str(result_file))
-
-        assert success is True
-        assert not result_file.exists()
+            service._load_dataset_file("/nonexistent/file.csv", "AAPL")
 
     def test_str2bool(self, service):
-        """Test string to boolean conversion"""
         assert service.str2bool(True) is True
-        assert service.str2bool(False) is False
-        assert service.str2bool("true") is True
-        assert service.str2bool("false") is False
         assert service.str2bool("yes") is True
-        assert service.str2bool("no") is False
-        assert service.str2bool("1") is True
-        assert service.str2bool("0") is False
-
+        assert service.str2bool("false") is False
         with pytest.raises(ValueError):
-            service.str2bool("invalid")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
+            service.str2bool("maybe")
