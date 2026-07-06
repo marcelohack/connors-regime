@@ -185,7 +185,7 @@ pytest --cov=connors_regime
 
 | Package | Description | Links |
 |---------|-------------|-------|
-| [connors-playground](https://github.com/marcelohack/connors-playground) | CLI + Streamlit UI (integration hub) | [README](https://github.com/marcelohack/connors-playground#readme) |
+| [connors-playground](https://github.com/marcelohack/connors-playground) | Workspace hub + API token manager | [README](https://github.com/marcelohack/connors-playground#readme) |
 | [connors-core](https://github.com/marcelohack/connors-core) | Registry, config, indicators, metrics | [README](https://github.com/marcelohack/connors-core#readme) |
 | [connors-backtest](https://github.com/marcelohack/connors-backtest) | Backtesting service + built-in strategies | [README](https://github.com/marcelohack/connors-backtest#readme) |
 | [connors-strategies](https://github.com/marcelohack/connors-strategies) | Trading strategy collection (private) | — |
