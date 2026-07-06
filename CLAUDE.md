@@ -69,6 +69,11 @@ mypy connors_regime
 - `RegimeMethod` enum: composite (deliberately the only built-in — add new methods only for a specific validated need, and make them pass the golden-period suite first)
 - `RegimeResult`: Container with detections, transitions, confidence scores, and enriched DataFrame
 
+**CLI** (`connors_regime/cli.py`)
+- Installed as the `connors-regime` console script (also `python -m connors_regime.cli`)
+- Argument choices (methods, datasources, markets, timespans) come dynamically from `RegimeService`
+- Supports `--method-params "key1:value1;key2:value2"` overrides, `--external-method` loading, dataset files, plotting/saving, and `--list-*` / `--show-method-params` info flags
+
 **Service Layer** (`connors_regime/services/regime_service.py`)
 - `RegimeService`: High-level API orchestrating data fetching, detection, and file I/O
 - Integrates with connors-datafetch for multi-source data (yfinance, polygon, finnhub, fmp)
@@ -146,6 +151,8 @@ Confidence (0.1-0.95) is the share of recent raw (pre-hysteresis) labels that ag
 
 Test files are in `tests/` directory:
 - `test_regime_detector.py`: Comprehensive tests for detectors and service
+- `test_cli.py`: CLI tests (argument handling, parameter parsing, service integration via mocks)
+- `test_golden_periods.py`: Real-SPY validation suite (gated by `RUN_INTEGRATION=1`)
 - Uses pytest fixtures for sample OHLCV data generation
 - Mocks external dependencies (data downloads)
 - Tests detector logic, service operations, file I/O, CLI integration

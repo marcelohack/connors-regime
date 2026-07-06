@@ -65,38 +65,38 @@ print(f"Confidence: {result.results.detections[-1].confidence:.1%}")
 
 ## CLI Usage
 
-The regime detection CLI is part of [connors-playground](https://github.com/marcelohack/connors-playground):
+Installing the package provides the `connors-regime` command (also runnable as `python -m connors_regime.cli`):
 
 ```bash
 # Basic regime detection
-python -m connors.cli.regime_detector --ticker AAPL --method composite --timespan 2Y
+connors-regime --ticker AAPL --method composite --timespan 2Y
 
 # With custom parameters
-python -m connors.cli.regime_detector --ticker MSFT --method composite \
+connors-regime --ticker MSFT --method composite \
   --method-params "confirm_days:10;volatility_window:30"
 
 # With plotting and saving
-python -m connors.cli.regime_detector --ticker NVDA --method composite \
+connors-regime --ticker NVDA --method composite \
   --timespan 1Y --plot --save-results --save-plot
 
 # External (experimental) detection method
-python -m connors.cli.regime_detector --ticker TSLA \
+connors-regime --ticker TSLA \
   --external-method ~/.connors/regime_methods/my_method.py --timespan 6M
 
 # Different markets and data sources
-python -m connors.cli.regime_detector --ticker BHP --method composite \
+connors-regime --ticker BHP --method composite \
   --market australia --datasource yfinance --timespan 1Y
 
 # Using dataset file
-python -m connors.cli.regime_detector --ticker CUSTOM --method composite \
+connors-regime --ticker CUSTOM --method composite \
   --dataset-file my_data.csv --plot
 
 # Show method parameters
-python -m connors.cli.regime_detector --method composite --show-method-params
+connors-regime --method composite --show-method-params
 
 # List methods and saved results
-python -m connors.cli.regime_detector --list-methods
-python -m connors.cli.regime_detector --list-saved
+connors-regime --list-methods
+connors-regime --list-saved
 ```
 
 ## Composite Detection
