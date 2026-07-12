@@ -134,3 +134,4 @@ Thumbs.db
 *.pickle
 *.h5
 *.hdf5
+graphify-out/
