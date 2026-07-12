@@ -157,7 +157,7 @@ class MyCustomDetector(BaseRegimeDetector):
 
 ## Output Format
 
-Results are saved to `~/.connors/regime_detections/{method}/{ticker}_{market}_{start}_{end}.json`
+Results are saved to `~/.connors/regime_detections/{method}/{ticker}_{start}_{end}.json`
 
 ```json
 {

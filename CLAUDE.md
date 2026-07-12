@@ -78,7 +78,7 @@ mypy connors_regime
 - `RegimeService`: High-level API orchestrating data fetching, detection, and file I/O
 - Integrates with connors-datafetch for multi-source data (yfinance, polygon, finnhub, fmp)
 - Handles external method loading via `load_external_method(file_path)`
-- Saves results to `~/.connors/regime_detections/{method}/{ticker}_{market}_{start}_{end}.json`
+- Saves results to `~/.connors/regime_detections/{method}/{ticker}_{start}_{end}.json`
 - Generates interactive Plotly visualizations with OHLC, volume, volatility, and regime panels
 
 ### Data Flow

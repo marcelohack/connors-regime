@@ -343,7 +343,7 @@ class RegimeService(BaseService):
         method_dir = self.regime_base_dir / method_folder_name
         self._ensure_directory_exists(method_dir)
 
-        # Generate filename with new pattern: {ticker}_{market}_{start}_{end}.json
+        # Generate filename with new pattern: {ticker}_{start}_{end}.json
         if hasattr(regime_result.data, "index") and not regime_result.data.empty:
             start_date = regime_result.data.index.min().strftime("%Y-%m-%d")
             end_date = regime_result.data.index.max().strftime("%Y-%m-%d")
@@ -351,15 +351,14 @@ class RegimeService(BaseService):
             start_date = "unknown"
             end_date = "unknown"
 
-        filename = (
-            f"{request.ticker}_{request.market_config}_{start_date}_{end_date}.json"
-        )
+        filename = f"{request.ticker}_{start_date}_{end_date}.json"
         results_path = method_dir / filename
 
         # Prepare results data
         results_data = {
             "ticker": regime_result.ticker,
             "method": method_folder_name,  # Use the same method name as folder
+            "market": request.market_config,
             "calculation_time": regime_result.calculation_time,
             "parameters": regime_result.parameters,
             "current_regime": regime_result.current_regime.value,
@@ -403,7 +402,7 @@ class RegimeService(BaseService):
         plots_dir = self.regime_base_dir / method_folder_name / "plots"
         self._ensure_directory_exists(plots_dir)
 
-        # Generate filename with new pattern: {ticker}_{market}_{start}_{end}.html
+        # Generate filename with new pattern: {ticker}_{start}_{end}.html
         if hasattr(regime_result.data, "index") and not regime_result.data.empty:
             start_date = regime_result.data.index.min().strftime("%Y-%m-%d")
             end_date = regime_result.data.index.max().strftime("%Y-%m-%d")
@@ -411,9 +410,7 @@ class RegimeService(BaseService):
             start_date = "unknown"
             end_date = "unknown"
 
-        filename = (
-            f"{request.ticker}_{request.market_config}_{start_date}_{end_date}.html"
-        )
+        filename = f"{request.ticker}_{start_date}_{end_date}.html"
         plot_path = plots_dir / filename
 
         # Create subplot with multiple panels
@@ -587,7 +584,7 @@ class RegimeService(BaseService):
         webbrowser.open(f"file://{plot_path}")
 
     def list_saved_results(
-        self, method: Optional[str] = None, market: Optional[str] = None
+        self, method: Optional[str] = None
     ) -> List[Dict[str, str]]:
         """List saved regime detection results"""
         results = []
@@ -601,45 +598,45 @@ class RegimeService(BaseService):
             if not method_dir.is_dir():
                 continue
 
-            if market:
-                market_dirs = [method_dir / market]
-            else:
-                market_dirs = [d for d in method_dir.iterdir() if d.is_dir()]
+            for result_file in method_dir.glob("*.json"):
+                try:
+                    # Parse filename to extract info: {ticker}_{start}_{end}.json
+                    name_parts = result_file.stem.split("_")
+                    if len(name_parts) >= 3:
+                        ticker = name_parts[0]
+                        start_date = name_parts[1]
+                        end_date = name_parts[2]
+                    else:
+                        ticker = result_file.stem
+                        start_date = "unknown"
+                        end_date = "unknown"
 
-            for market_dir in market_dirs:
-                if not market_dir.is_dir() or market_dir.name == "plots":
-                    continue
-
-                for result_file in market_dir.glob("*.json"):
+                    # Read market from saved result if available
+                    market = "unknown"
                     try:
-                        # Parse filename to extract info
-                        name_parts = result_file.stem.split("_")
-                        if len(name_parts) >= 3:
-                            ticker = name_parts[0]
-                            start_date = name_parts[1]
-                            end_date = name_parts[2]
-                        else:
-                            ticker = result_file.stem
-                            start_date = "unknown"
-                            end_date = "unknown"
+                        with open(result_file, "r") as f:
+                            saved_data = json.load(f)
+                            market = saved_data.get("market", "unknown")
+                    except Exception:
+                        pass
 
-                        results.append(
-                            {
-                                "ticker": ticker,
-                                "method": method_dir.name,
-                                "market": market_dir.name,
-                                "start_date": start_date,
-                                "end_date": end_date,
-                                "file_path": str(result_file),
-                                "modified": datetime.fromtimestamp(
-                                    result_file.stat().st_mtime
-                                ).isoformat(),
-                            }
-                        )
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Could not parse result file {result_file}: {e}"
-                        )
+                    results.append(
+                        {
+                            "ticker": ticker,
+                            "method": method_dir.name,
+                            "market": market,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "file_path": str(result_file),
+                            "modified": datetime.fromtimestamp(
+                                result_file.stat().st_mtime
+                            ).isoformat(),
+                        }
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not parse result file {result_file}: {e}"
+                    )
 
         # Sort by modification time (newest first)
         results.sort(key=lambda x: x["modified"], reverse=True)
@@ -662,12 +659,7 @@ class RegimeService(BaseService):
                 path.unlink()
 
                 # Also delete corresponding plot if it exists
-                plot_path = (
-                    path.parent.parent
-                    / "plots"
-                    / path.parent.name
-                    / (path.stem + ".html")
-                )
+                plot_path = path.parent / "plots" / (path.stem + ".html")
                 if plot_path.exists():
                     plot_path.unlink()
 
